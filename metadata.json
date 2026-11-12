@@ -1,0 +1,6 @@
+{
+  "name": "FolderCam",
+  "description": "Folder-based camera, video, and audio recorder with live waveform visualizer.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
