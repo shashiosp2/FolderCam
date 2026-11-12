@@ -1,8 +1,10 @@
 package com.example.ui.components
 
+import android.content.Intent
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -15,28 +17,33 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.SdStorage
+import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Badge
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Divider
+import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemDefaults
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -47,339 +54,453 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import com.example.data.FolderRepository
 import com.example.model.MediaFolder
-
-private val COLOR_PALETTE = listOf(
-    "#38BDF8", // Cyan
-    "#F59E0B", // Amber
-    "#EC4899", // Pink
-    "#10B981", // Emerald
-    "#8B5CF6", // Purple
-    "#06B6D4", // Teal
-    "#EF4444", // Red
-    "#EAB308"  // Yellow
-)
 
 @Composable
 fun FolderSettingsDialog(
     folders: List<MediaFolder>,
-    selectedFolderId: String,
+    selectedFolderId: String?,
     folderCounts: Map<String, Int>,
     onSelectFolder: (MediaFolder) -> Unit,
-    onAddFolder: (name: String, colorHex: String) -> Unit,
+    onAddFolder: (name: String, sdcardPath: String, treeUri: String?) -> Unit,
+    onUpdateFolder: (folderId: String, name: String, sdcardPath: String, treeUri: String?) -> Unit,
     onDeleteFolder: (folderId: String) -> Unit,
+    onListSdcardDirs: (String) -> List<String>,
+    onCreateSdcardDir: (String, String) -> String,
+    onResolveTreeUri: (Uri) -> String,
     onDismiss: () -> Unit
 ) {
-    var isAddingNew by remember { mutableStateOf(false) }
-    var newFolderName by remember { mutableStateOf("") }
-    var selectedColorHex by remember { mutableStateOf(COLOR_PALETTE.first()) }
+    val colorScheme = MaterialTheme.colorScheme
+    val context = LocalContext.current
+    val requiresAtLeastOneFolder = folders.isEmpty()
+
+    var isEditingOrAdding by remember(requiresAtLeastOneFolder) {
+        mutableStateOf(requiresAtLeastOneFolder)
+    }
+    var editingFolderId by remember { mutableStateOf<String?>(null) }
+    var folderName by remember { mutableStateOf("") }
+    var sdcardLocation by remember { mutableStateOf("/sdcard/") }
+    var selectedTreeUri by remember { mutableStateOf<String?>(null) }
+    var showSdcardBrowser by remember { mutableStateOf(false) }
+    var validationError by remember { mutableStateOf<String?>(null) }
+
+    val documentTreeLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+            } catch (e: Exception) {
+                // Ignore if persistable permission not supported by provider
+            }
+            selectedTreeUri = uri.toString()
+            val resolvedPath = onResolveTreeUri(uri)
+            sdcardLocation = resolvedPath
+            if (folderName.isBlank()) {
+                val suggestedName = resolvedPath.substringAfterLast('/').ifEmpty { "MyFolder" }
+                folderName = suggestedName
+            }
+            validationError = null
+        }
+    }
 
     AlertDialog(
-        onDismissRequest = onDismiss,
-        modifier = Modifier.fillMaxWidth(0.95f),
-        containerColor = Color(0xFF161B22),
-        titleContentColor = Color.White,
-        textContentColor = Color(0xFFC9D1D9),
-        title = {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "Destination Folders",
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White
-                )
-                IconButton(onClick = onDismiss) {
-                    Icon(
-                        imageVector = Icons.Default.Close,
-                        contentDescription = "Close",
-                        tint = Color(0xFF8B949E)
-                    )
-                }
+        onDismissRequest = {
+            if (!requiresAtLeastOneFolder) {
+                onDismiss()
             }
+        },
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("folder_settings_dialog"),
+        icon = {
+            Icon(
+                imageVector = if (requiresAtLeastOneFolder) Icons.Default.WarningAmber else Icons.Default.SdStorage,
+                contentDescription = null,
+                tint = if (requiresAtLeastOneFolder) colorScheme.error else colorScheme.primary
+            )
+        },
+        title = {
+            Text(
+                text = if (requiresAtLeastOneFolder) {
+                    "Specify At Least 1 Folder"
+                } else {
+                    "Folder Settings (/sdcard)"
+                },
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold
+            )
         },
         text = {
             Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 4.dp)
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                // Info banner explaining automatic routing
-                Surface(
-                    color = Color(0xFF21262D),
-                    shape = RoundedCornerShape(10.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Row(
-                        modifier = Modifier.padding(10.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                // Banner if zero folders exist
+                if (requiresAtLeastOneFolder) {
+                    Surface(
+                        color = colorScheme.errorContainer,
+                        contentColor = colorScheme.onErrorContainer,
+                        shape = MaterialTheme.shapes.medium,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("first_time_folder_required_banner")
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Info,
-                            contentDescription = "Info",
-                            tint = Color(0xFF38BDF8),
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "All photos, videos, and audio are automatically saved to your selected folder.",
-                            fontSize = 12.sp,
-                            color = Color(0xFF8B949E)
-                        )
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.WarningAmber,
+                                contentDescription = null,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = "No folders are configured by default. Please specify at least 1 folder (Name and /sdcard Location) to store your recorded audio, photos, and videos.",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
+                } else {
+                    Surface(
+                        color = colorScheme.secondaryContainer,
+                        contentColor = colorScheme.onSecondaryContainer,
+                        shape = MaterialTheme.shapes.medium,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.SdStorage,
+                                contentDescription = null,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = "When a folder is selected in the bottom bar, all recorded audio, photos, and videos are automatically saved to its /sdcard location.",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
                     }
                 }
 
-                Spacer(modifier = Modifier.height(14.dp))
-
-                if (isAddingNew) {
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = Color(0xFF0D1117)),
-                        border = BorderStroke(1.dp, Color(0xFF30363D)),
-                        modifier = Modifier.fillMaxWidth()
+                // Add / Edit Folder Form
+                if (isEditingOrAdding) {
+                    OutlinedCard(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = MaterialTheme.shapes.large,
+                        border = BorderStroke(1.dp, colorScheme.primary)
                     ) {
-                        Column(modifier = Modifier.padding(14.dp)) {
+                        Column(
+                            modifier = Modifier.padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
                             Text(
-                                text = "Create New Folder",
-                                fontSize = 14.sp,
+                                text = if (editingFolderId != null) "Edit Folder" else "New Destination Folder",
+                                style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold,
-                                color = Color.White
+                                color = colorScheme.primary
                             )
 
-                            Spacer(modifier = Modifier.height(10.dp))
-
                             OutlinedTextField(
-                                value = newFolderName,
-                                onValueChange = { newFolderName = it },
-                                label = { Text("Folder Name", color = Color(0xFF8B949E)) },
+                                value = folderName,
+                                onValueChange = {
+                                    folderName = it
+                                    validationError = null
+                                    // Auto-suggest /sdcard/<name> if user hasn't picked a specific folder yet
+                                    if (sdcardLocation == "/sdcard/" || sdcardLocation == "/sdcard") {
+                                        val safe = it.trim().replace("[^a-zA-Z0-9_-]".toRegex(), "_")
+                                        if (safe.isNotEmpty()) {
+                                            sdcardLocation = "/sdcard/$safe"
+                                        }
+                                    }
+                                },
+                                label = { Text("Folder Name (e.g. Work, Notes)") },
+                                placeholder = { Text("Enter folder button name") },
                                 singleLine = true,
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedTextColor = Color.White,
-                                    unfocusedTextColor = Color.White,
-                                    focusedBorderColor = Color(0xFF38BDF8),
-                                    unfocusedBorderColor = Color(0xFF30363D)
-                                ),
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .testTag("new_folder_name_input")
                             )
 
-                            Spacer(modifier = Modifier.height(12.dp))
-
-                            Text(
-                                text = "Choose Accent Color",
-                                fontSize = 12.sp,
-                                color = Color(0xFF8B949E)
+                            OutlinedTextField(
+                                value = sdcardLocation,
+                                onValueChange = {
+                                    sdcardLocation = it
+                                    validationError = null
+                                },
+                                label = { Text("Location on /sdcard") },
+                                placeholder = { Text("/sdcard/MyFolder") },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Default.FolderOpen,
+                                        contentDescription = null
+                                    )
+                                },
+                                singleLine = true,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("new_folder_location_input")
                             )
 
-                            Spacer(modifier = Modifier.height(8.dp))
-
-                            LazyRow(
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                modifier = Modifier.fillMaxWidth()
+                            // Buttons to select folder on /sdcard
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                items(COLOR_PALETTE) { hex ->
-                                    val color = Color(android.graphics.Color.parseColor(hex))
-                                    val isColorSelected = hex == selectedColorHex
-                                    Box(
-                                        modifier = Modifier
-                                            .size(32.dp)
-                                            .clip(CircleShape)
-                                            .background(color)
-                                            .border(
-                                                width = if (isColorSelected) 3.dp else 1.dp,
-                                                color = if (isColorSelected) Color.White else Color.Transparent,
-                                                shape = CircleShape
-                                            )
-                                            .clickable { selectedColorHex = hex },
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        if (isColorSelected) {
-                                            Icon(
-                                                imageVector = Icons.Default.Check,
-                                                contentDescription = "Selected color",
-                                                tint = Color.White,
-                                                modifier = Modifier.size(16.dp)
-                                            )
-                                        }
-                                    }
+                                FilledTonalButton(
+                                    onClick = { showSdcardBrowser = true },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("browse_sdcard_button")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.SdStorage,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Browse /sdcard")
+                                }
+
+                                OutlinedButton(
+                                    onClick = { documentTreeLauncher.launch(null) },
+                                    modifier = Modifier.testTag("system_folder_picker_button")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.FolderOpen,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("System")
                                 }
                             }
 
-                            Spacer(modifier = Modifier.height(14.dp))
+                            validationError?.let { err ->
+                                Text(
+                                    text = err,
+                                    color = colorScheme.error,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
 
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.End
                             ) {
-                                TextButton(onClick = { isAddingNew = false }) {
-                                    Text("Cancel", color = Color(0xFF8B949E))
+                                if (!requiresAtLeastOneFolder) {
+                                    TextButton(
+                                        onClick = {
+                                            isEditingOrAdding = false
+                                            editingFolderId = null
+                                            validationError = null
+                                        }
+                                    ) {
+                                        Text("Cancel")
+                                    }
+                                    Spacer(modifier = Modifier.width(6.dp))
                                 }
-                                Spacer(modifier = Modifier.width(8.dp))
+
                                 Button(
                                     onClick = {
-                                        if (newFolderName.isNotBlank()) {
-                                            onAddFolder(newFolderName.trim(), selectedColorHex)
-                                            newFolderName = ""
-                                            isAddingNew = false
+                                        val cleanName = folderName.trim()
+                                        val cleanPath = sdcardLocation.trim()
+                                        when {
+                                            cleanName.isEmpty() -> {
+                                                validationError = "Please enter a folder name."
+                                            }
+                                            cleanPath.isEmpty() || cleanPath == "/sdcard" || cleanPath == "/sdcard/" -> {
+                                                val normalized = FolderRepository.normalizeSdcardPath(cleanPath, cleanName)
+                                                saveOrUpdate(
+                                                    editingFolderId = editingFolderId,
+                                                    name = cleanName,
+                                                    path = normalized,
+                                                    treeUri = selectedTreeUri,
+                                                    onAddFolder = onAddFolder,
+                                                    onUpdateFolder = onUpdateFolder
+                                                )
+                                                folderName = ""
+                                                sdcardLocation = "/sdcard/"
+                                                selectedTreeUri = null
+                                                editingFolderId = null
+                                                isEditingOrAdding = false
+                                            }
+                                            else -> {
+                                                val normalized = FolderRepository.normalizeSdcardPath(cleanPath, cleanName)
+                                                saveOrUpdate(
+                                                    editingFolderId = editingFolderId,
+                                                    name = cleanName,
+                                                    path = normalized,
+                                                    treeUri = selectedTreeUri,
+                                                    onAddFolder = onAddFolder,
+                                                    onUpdateFolder = onUpdateFolder
+                                                )
+                                                folderName = ""
+                                                sdcardLocation = "/sdcard/"
+                                                selectedTreeUri = null
+                                                editingFolderId = null
+                                                isEditingOrAdding = false
+                                            }
                                         }
                                     },
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = Color(0xFF38BDF8),
-                                        contentColor = Color.Black
-                                    ),
-                                    enabled = newFolderName.isNotBlank(),
                                     modifier = Modifier.testTag("save_new_folder_button")
                                 ) {
-                                    Text("Create", fontWeight = FontWeight.Bold)
+                                    Icon(
+                                        imageVector = Icons.Default.Check,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(if (editingFolderId != null) "Update Folder" else "Save Folder")
                                 }
                             }
                         }
                     }
-                    Spacer(modifier = Modifier.height(12.dp))
                 } else {
-                    OutlinedButton(
-                        onClick = { isAddingNew = true },
+                    FilledTonalButton(
+                        onClick = {
+                            editingFolderId = null
+                            folderName = ""
+                            sdcardLocation = "/sdcard/"
+                            selectedTreeUri = null
+                            isEditingOrAdding = true
+                        },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .testTag("open_add_folder_form"),
-                        border = BorderStroke(1.dp, Color(0xFF38BDF8))
+                            .testTag("open_add_folder_form")
                     ) {
                         Icon(
                             imageVector = Icons.Default.Add,
                             contentDescription = null,
-                            tint = Color(0xFF38BDF8),
                             modifier = Modifier.size(18.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "Add Custom Folder",
-                            color = Color(0xFF38BDF8),
-                            fontWeight = FontWeight.SemiBold
-                        )
+                        Text("Add Folder (Name & /sdcard Location)")
                     }
-                    Spacer(modifier = Modifier.height(14.dp))
                 }
 
-                // List of existing folders
-                Text(
-                    text = "Active Folders (${folders.size})",
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Color(0xFF8B949E)
-                )
+                // Existing Folders List
+                if (folders.isNotEmpty()) {
+                    HorizontalDivider()
+                    Text(
+                        text = "Configured Folders (${folders.size})",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = colorScheme.onSurfaceVariant
+                    )
 
-                Spacer(modifier = Modifier.height(8.dp))
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(220.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(folders, key = { it.id }) { folder ->
+                            val isSelected = folder.id == selectedFolderId
+                            val count = folderCounts[folder.id] ?: 0
 
-                LazyColumn(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(260.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    items(folders, key = { it.id }) { folder ->
-                        val isSelected = folder.id == selectedFolderId
-                        val count = folderCounts[folder.id] ?: 0
-                        val folderColor = try {
-                            Color(android.graphics.Color.parseColor(folder.colorHex))
-                        } catch (e: Exception) {
-                            Color(0xFF38BDF8)
-                        }
-
-                        Surface(
-                            color = if (isSelected) Color(0xFF21262D) else Color(0xFF0D1117),
-                            shape = RoundedCornerShape(12.dp),
-                            border = BorderStroke(
-                                width = if (isSelected) 1.5.dp else 1.dp,
-                                color = if (isSelected) folderColor else Color(0xFF30363D)
-                            ),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .clickable { onSelectFolder(folder) }
-                        ) {
-                            Row(
+                            OutlinedCard(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 14.dp, vertical = 10.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
+                                    .clickable { onSelectFolder(folder) },
+                                border = BorderStroke(
+                                    width = if (isSelected) 2.dp else 1.dp,
+                                    color = if (isSelected) colorScheme.primary else colorScheme.outlineVariant
+                                )
                             ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.weight(1f)
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(36.dp)
-                                            .clip(CircleShape)
-                                            .background(folderColor.copy(alpha = 0.2f)),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Folder,
-                                            contentDescription = null,
-                                            tint = folderColor,
-                                            modifier = Modifier.size(20.dp)
-                                        )
-                                    }
-
-                                    Spacer(modifier = Modifier.width(12.dp))
-
-                                    Column {
+                                ListItem(
+                                    headlineContent = {
                                         Row(verticalAlignment = Alignment.CenterVertically) {
                                             Text(
                                                 text = folder.name,
-                                                color = Color.White,
-                                                fontSize = 14.sp,
-                                                fontWeight = FontWeight.SemiBold
+                                                style = MaterialTheme.typography.titleSmall,
+                                                fontWeight = FontWeight.Bold,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
                                             )
                                             if (isSelected) {
-                                                Spacer(modifier = Modifier.width(6.dp))
-                                                Box(
-                                                    modifier = Modifier
-                                                        .clip(RoundedCornerShape(6.dp))
-                                                        .background(folderColor.copy(alpha = 0.25f))
-                                                        .padding(horizontal = 6.dp, vertical = 1.dp)
+                                                Spacer(modifier = Modifier.width(8.dp))
+                                                Badge(
+                                                    containerColor = colorScheme.primaryContainer,
+                                                    contentColor = colorScheme.onPrimaryContainer
                                                 ) {
-                                                    Text(
-                                                        text = "Active",
-                                                        color = folderColor,
-                                                        fontSize = 10.sp,
-                                                        fontWeight = FontWeight.Bold
-                                                    )
+                                                    Text("Active")
                                                 }
                                             }
                                         }
-                                        Text(
-                                            text = "$count media items saved",
-                                            color = Color(0xFF8B949E),
-                                            fontSize = 12.sp
-                                        )
-                                    }
-                                }
-
-                                if (folders.size > 1 && !folder.isDefault) {
-                                    IconButton(
-                                        onClick = { onDeleteFolder(folder.id) },
-                                        modifier = Modifier.size(36.dp)
-                                    ) {
+                                    },
+                                    supportingContent = {
+                                        Column {
+                                            Text(
+                                                text = folder.sdcardPath,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = colorScheme.primary,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Text(
+                                                text = "$count saved item(s)",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    },
+                                    leadingContent = {
                                         Icon(
-                                            imageVector = Icons.Default.DeleteOutline,
-                                            contentDescription = "Delete Folder",
-                                            tint = Color(0xFFF87171),
-                                            modifier = Modifier.size(18.dp)
+                                            imageVector = Icons.Default.Folder,
+                                            contentDescription = null,
+                                            tint = if (isSelected) colorScheme.primary else colorScheme.onSurfaceVariant
                                         )
-                                    }
-                                }
+                                    },
+                                    trailingContent = {
+                                        Row {
+                                            IconButton(
+                                                onClick = {
+                                                    editingFolderId = folder.id
+                                                    folderName = folder.name
+                                                    sdcardLocation = folder.sdcardPath
+                                                    selectedTreeUri = folder.treeUri
+                                                    isEditingOrAdding = true
+                                                }
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Edit,
+                                                    contentDescription = "Edit Folder",
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                            }
+                                            IconButton(
+                                                onClick = { onDeleteFolder(folder.id) }
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.DeleteOutline,
+                                                    contentDescription = "Delete Folder",
+                                                    tint = colorScheme.error,
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                            }
+                                        }
+                                    },
+                                    colors = ListItemDefaults.colors(
+                                        containerColor = if (isSelected) {
+                                            colorScheme.primaryContainer.copy(alpha = 0.25f)
+                                        } else {
+                                            colorScheme.surface
+                                        }
+                                    )
+                                )
                             }
                         }
                     }
@@ -387,14 +508,275 @@ fun FolderSettingsDialog(
             }
         },
         confirmButton = {
-            Button(
-                onClick = onDismiss,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = Color(0xFF21262D),
-                    contentColor = Color.White
-                )
+            if (!requiresAtLeastOneFolder) {
+                Button(
+                    onClick = onDismiss,
+                    modifier = Modifier.testTag("close_settings_button")
+                ) {
+                    Text("Done")
+                }
+            }
+        }
+    )
+
+    // Interactive /sdcard Directory Browser Modal
+    if (showSdcardBrowser) {
+        SdcardFolderPickerDialog(
+            initialSdcardPath = sdcardLocation,
+            onListDirectories = onListSdcardDirs,
+            onCreateDirectory = onCreateSdcardDir,
+            onFolderPicked = { pickedSdcardPath ->
+                sdcardLocation = pickedSdcardPath
+                if (folderName.isBlank() && pickedSdcardPath != "/sdcard") {
+                    folderName = pickedSdcardPath.substringAfterLast('/')
+                }
+                showSdcardBrowser = false
+                validationError = null
+            },
+            onDismiss = { showSdcardBrowser = false }
+        )
+    }
+}
+
+private fun saveOrUpdate(
+    editingFolderId: String?,
+    name: String,
+    path: String,
+    treeUri: String?,
+    onAddFolder: (String, String, String?) -> Unit,
+    onUpdateFolder: (String, String, String, String?) -> Unit
+) {
+    if (editingFolderId != null) {
+        onUpdateFolder(editingFolderId, name, path, treeUri)
+    } else {
+        onAddFolder(name, path, treeUri)
+    }
+}
+
+@Composable
+fun SdcardFolderPickerDialog(
+    initialSdcardPath: String,
+    onListDirectories: (String) -> List<String>,
+    onCreateDirectory: (String, String) -> String,
+    onFolderPicked: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val colorScheme = MaterialTheme.colorScheme
+    var currentPath by remember {
+        val clean = FolderRepository.normalizeSdcardPath(initialSdcardPath, "")
+        mutableStateOf(if (clean.startsWith("/sdcard")) clean else "/sdcard")
+    }
+    var refreshTrigger by remember { mutableStateOf(0) }
+    val directories = remember(currentPath, refreshTrigger) {
+        onListDirectories(currentPath)
+    }
+    var isCreatingSubfolder by remember { mutableStateOf(false) }
+    var newSubfolderName by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(
+                imageVector = Icons.Default.SdStorage,
+                contentDescription = null,
+                tint = colorScheme.primary
+            )
+        },
+        title = {
+            Text(
+                text = "Select Folder on /sdcard",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text("Done")
+                // Current /sdcard path header with Up navigation
+                Surface(
+                    color = colorScheme.secondaryContainer,
+                    contentColor = colorScheme.onSecondaryContainer,
+                    shape = MaterialTheme.shapes.medium,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            if (currentPath != "/sdcard") {
+                                IconButton(
+                                    onClick = {
+                                        val parent = currentPath.substringBeforeLast('/').ifEmpty { "/sdcard" }
+                                        currentPath = if (parent.startsWith("/sdcard")) parent else "/sdcard"
+                                    },
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                        contentDescription = "Up directory"
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(4.dp))
+                            }
+                            Text(
+                                text = currentPath,
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+
+                        IconButton(
+                            onClick = { isCreatingSubfolder = !isCreatingSubfolder },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.CreateNewFolder,
+                                contentDescription = "Create subfolder on /sdcard"
+                            )
+                        }
+                    }
+                }
+
+                if (isCreatingSubfolder) {
+                    OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+                        Column(
+                            modifier = Modifier.padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedTextField(
+                                value = newSubfolderName,
+                                onValueChange = { newSubfolderName = it },
+                                label = { Text("New folder in $currentPath") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.End
+                            ) {
+                                TextButton(onClick = { isCreatingSubfolder = false }) {
+                                    Text("Cancel")
+                                }
+                                Button(
+                                    onClick = {
+                                        if (newSubfolderName.isNotBlank()) {
+                                            val createdPath = onCreateDirectory(currentPath, newSubfolderName)
+                                            currentPath = createdPath
+                                            newSubfolderName = ""
+                                            isCreatingSubfolder = false
+                                            refreshTrigger++
+                                        }
+                                    },
+                                    enabled = newSubfolderName.isNotBlank()
+                                ) {
+                                    Text("Create & Open")
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Text(
+                    text = "Tap a folder below to browse inside, or tap 'Select This Folder' to use $currentPath",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colorScheme.onSurfaceVariant
+                )
+
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(220.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    if (directories.isEmpty()) {
+                        item {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 32.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "No subfolders in $currentPath",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    } else {
+                        items(directories) { dirPath ->
+                            val folderTitle = dirPath.substringAfterLast('/')
+                            OutlinedCard(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { currentPath = dirPath }
+                                    .testTag("sdcard_dir_item_$folderTitle")
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            imageVector = Icons.Default.Folder,
+                                            contentDescription = null,
+                                            tint = colorScheme.primary
+                                        )
+                                        Spacer(modifier = Modifier.width(12.dp))
+                                        Column {
+                                            Text(
+                                                text = folderTitle,
+                                                style = MaterialTheme.typography.bodyLarge,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                            Text(
+                                                text = dirPath,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                    TextButton(onClick = { onFolderPicked(dirPath) }) {
+                                        Text("Use")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onFolderPicked(currentPath) },
+                modifier = Modifier.testTag("confirm_sdcard_folder_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Check,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Select $currentPath")
             }
         }
     )

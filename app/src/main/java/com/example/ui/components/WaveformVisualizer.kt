@@ -20,11 +20,15 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.outlined.SwipeLeft
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AssistChipDefaults
+import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -38,27 +42,27 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.example.model.MediaFolder
 import java.util.Locale
 
 @Composable
 fun WaveformVisualizer(
+    isRecording: Boolean,
     durationSeconds: Int,
     amplitudes: List<Float>,
     currentDecibels: Float,
-    targetFolder: MediaFolder,
+    targetFolder: MediaFolder?,
+    onOpenFolderSettings: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    // Pulse animation for recording badge
+    val colorScheme = MaterialTheme.colorScheme
     val transition = rememberInfiniteTransition(label = "pulse")
     val pulseAlpha by transition.animateFloat(
-        initialValue = 0.3f,
+        initialValue = 0.35f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
             animation = tween(600, easing = FastOutSlowInEasing),
@@ -71,109 +75,117 @@ fun WaveformVisualizer(
     val secs = durationSeconds % 60
     val formattedTime = String.format(Locale.US, "%02d:%02d", mins, secs)
 
-    // Viewfinder goes completely blank (deep studio black) as requested
-    Box(
+    // Blank viewfinder surface with Material 3 styling and live waveform
+    Surface(
         modifier = modifier
             .fillMaxSize()
-            .background(Color(0xFF090C10))
             .testTag("audio_waveform_view"),
-        contentAlignment = Alignment.Center
+        color = colorScheme.surface
     ) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 24.dp, vertical = 32.dp),
+                .padding(horizontal = 24.dp, vertical = 16.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.SpaceBetween
+            verticalArrangement = Arrangement.Center
         ) {
-            // Top Status Pill
+            // Status Pill (Material 3 Tonal Surface)
             Surface(
-                color = Color(0xFF161B22),
-                shape = RoundedCornerShape(20.dp),
-                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF30363D))
+                color = if (isRecording) colorScheme.errorContainer else colorScheme.secondaryContainer,
+                contentColor = if (isRecording) colorScheme.onErrorContainer else colorScheme.onSecondaryContainer,
+                shape = MaterialTheme.shapes.extraLarge,
+                tonalElevation = 2.dp
             ) {
                 Row(
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
-                        imageVector = Icons.Default.FiberManualRecord,
-                        contentDescription = "Recording indicator",
-                        tint = Color(0xFFEF4444).copy(alpha = pulseAlpha),
-                        modifier = Modifier.size(14.dp)
+                        imageVector = if (isRecording) Icons.Default.FiberManualRecord else Icons.Default.Mic,
+                        contentDescription = if (isRecording) "Recording audio" else "Audio mode ready",
+                        tint = if (isRecording) {
+                            colorScheme.error.copy(alpha = pulseAlpha)
+                        } else {
+                            colorScheme.onSecondaryContainer
+                        },
+                        modifier = Modifier.size(16.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "RECORDING AUDIO",
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 1.sp
+                        text = if (isRecording) "RECORDING AUDIO" else "AUDIO RECORDER READY",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold
                     )
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Box(
-                        modifier = Modifier
-                            .clip(CircleShape)
-                            .background(Color(0xFF21262D))
-                            .padding(horizontal = 8.dp, vertical = 2.dp)
-                    ) {
-                        Text(
-                            text = "${currentDecibels.toInt()} dB",
-                            color = Color(0xFF38BDF8),
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
+                    if (isRecording) {
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Box(
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(colorScheme.surface.copy(alpha = 0.35f))
+                                .padding(horizontal = 8.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                text = "${currentDecibels.toInt()} dB",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
                     }
                 }
             }
 
-            // Center Area: Large Timer + Live Dancing Waveform Canvas
-            Column(
+            Spacer(modifier = Modifier.height(24.dp))
+
+            // Digital Timer Readout
+            Text(
+                text = formattedTime,
+                style = MaterialTheme.typography.displayLarge.copy(
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Light
+                ),
+                color = if (isRecording) colorScheme.primary else colorScheme.onSurface
+            )
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            Text(
+                text = if (isRecording) {
+                    "Capturing live microphone waveform (AAC 44.1 kHz)"
+                } else {
+                    "Tap the Audio Record button below to start recording"
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = colorScheme.onSurfaceVariant
+            )
+
+            Spacer(modifier = Modifier.height(28.dp))
+
+            // Material 3 Elevated Card for Waveform Canvas
+            ElevatedCard(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 16.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
+                    .height(156.dp),
+                shape = MaterialTheme.shapes.extraLarge
             ) {
-                Text(
-                    text = formattedTime,
-                    color = Color.White,
-                    fontSize = 52.sp,
-                    fontWeight = FontWeight.Light,
-                    fontFamily = FontFamily.Monospace,
-                    letterSpacing = 2.sp
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Text(
-                    text = "High Fidelity AAC 44.1kHz",
-                    color = Color(0xFF8B949E),
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium
-                )
-
-                Spacer(modifier = Modifier.height(36.dp))
-
-                // Canvas Dynamic Waveform Visualizer
                 Box(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .height(140.dp)
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(Color(0xFF10141B))
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                        .fillMaxSize()
+                        .background(colorScheme.surfaceVariant.copy(alpha = 0.45f))
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    Canvas(
-                        modifier = Modifier.fillMaxSize()
-                    ) {
+                    val primaryColor = colorScheme.primary
+                    val tertiaryColor = colorScheme.tertiary
+                    val outlineVariantColor = colorScheme.outlineVariant
+
+                    Canvas(modifier = Modifier.fillMaxSize()) {
                         val canvasWidth = size.width
                         val canvasHeight = size.height
                         val centerY = canvasHeight / 2f
 
-                        // Baseline center guide line
+                        // Center reference baseline
                         drawLine(
-                            color = Color(0xFF1E2530),
+                            color = outlineVariantColor,
                             start = Offset(0f, centerY),
                             end = Offset(canvasWidth, centerY),
                             strokeWidth = 1.dp.toPx()
@@ -184,29 +196,36 @@ fun WaveformVisualizer(
                         val totalSpacing = barSpacing * (barCount - 1)
                         val barWidth = ((canvasWidth - totalSpacing) / barCount).coerceAtLeast(2.dp.toPx())
 
-                        // Take latest amplitudes or pad with idle values
-                        val displayAmps = if (amplitudes.isEmpty()) {
-                            List(barCount) { 0.08f }
+                        val displayAmps = if (!isRecording || amplitudes.isEmpty()) {
+                            List(barCount) { index ->
+                                // Subtle idle wave pattern when waiting to record
+                                val wave = kotlin.math.sin(index * 0.4f) * 0.04f + 0.08f
+                                wave.coerceIn(0.05f, 0.14f)
+                            }
                         } else {
                             val recent = amplitudes.takeLast(barCount)
                             if (recent.size < barCount) {
-                                List(barCount - recent.size) { 0.08f } + recent
+                                List(barCount - recent.size) { 0.06f } + recent
                             } else {
                                 recent
                             }
                         }
 
                         for (i in 0 until barCount) {
-                            val amp = displayAmps.getOrElse(i) { 0.08f }.coerceIn(0.06f, 1.0f)
+                            val amp = displayAmps.getOrElse(i) { 0.08f }.coerceIn(0.05f, 1.0f)
                             val x = i * (barWidth + barSpacing)
-                            val barHeight = (amp * (canvasHeight * 0.85f)).coerceAtLeast(6.dp.toPx())
+                            val barHeight = (amp * (canvasHeight * 0.86f)).coerceAtLeast(6.dp.toPx())
                             val top = centerY - (barHeight / 2f)
 
                             val gradientBrush = Brush.verticalGradient(
-                                colors = listOf(
-                                    Color(0xFF38BDF8),
-                                    Color(0xFF10B981)
-                                ),
+                                colors = if (isRecording) {
+                                    listOf(primaryColor, tertiaryColor)
+                                } else {
+                                    listOf(
+                                        primaryColor.copy(alpha = 0.45f),
+                                        tertiaryColor.copy(alpha = 0.45f)
+                                    )
+                                },
                                 startY = top,
                                 endY = top + barHeight
                             )
@@ -222,37 +241,55 @@ fun WaveformVisualizer(
                 }
             }
 
-            // Bottom Destination Indicator
-            Surface(
-                color = Color(0xFF161B22),
-                shape = RoundedCornerShape(12.dp),
-                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF30363D))
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
+            Spacer(modifier = Modifier.height(20.dp))
+
+            // Destination Folder Chip (M3 AssistChip)
+            AssistChip(
+                onClick = onOpenFolderSettings,
+                label = {
+                    if (targetFolder != null) {
+                        Text(
+                            text = "${targetFolder.name} • ${targetFolder.sdcardPath}",
+                            style = MaterialTheme.typography.labelLarge
+                        )
+                    } else {
+                        Text(
+                            text = "No folder specified — Tap to set /sdcard folder",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = colorScheme.error
+                        )
+                    }
+                },
+                leadingIcon = {
                     Icon(
                         imageVector = Icons.Default.Folder,
-                        contentDescription = "Target Folder",
-                        tint = try {
-                            Color(android.graphics.Color.parseColor(targetFolder.colorHex))
-                        } catch (e: Exception) {
-                            Color(0xFF38BDF8)
-                        },
+                        contentDescription = null,
+                        tint = if (targetFolder != null) colorScheme.primary else colorScheme.error,
                         modifier = Modifier.size(18.dp)
                     )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Saving directly to: ",
-                        color = Color(0xFF8B949E),
-                        fontSize = 13.sp
+                },
+                colors = AssistChipDefaults.assistChipColors(
+                    containerColor = colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                )
+            )
+
+            if (!isRecording) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.SwipeLeft,
+                        contentDescription = null,
+                        tint = colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(16.dp)
                     )
+                    Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = targetFolder.name,
-                        color = Color.White,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold
+                        text = "Swipe left for Photo mode, then Video mode",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = colorScheme.onSurfaceVariant
                     )
                 }
             }

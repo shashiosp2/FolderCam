@@ -1,17 +1,15 @@
 package com.example.ui.components
 
-import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,7 +25,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CameraAlt
@@ -37,33 +34,48 @@ import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.outlined.CameraAlt
+import androidx.compose.material.icons.outlined.Mic
+import androidx.compose.material.icons.outlined.Videocam
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AssistChipDefaults
+import androidx.compose.material3.Badge
+import androidx.compose.material3.ElevatedFilterChip
+import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.example.model.CaptureState
 import com.example.model.MediaFolder
+import com.example.model.RecorderMode
+import java.util.Locale
 
 @Composable
 fun DualBottomBars(
     folders: List<MediaFolder>,
-    selectedFolderId: String,
+    selectedFolderId: String?,
     folderItemCounts: Map<String, Int>,
+    currentMode: RecorderMode,
     captureState: CaptureState,
     videoDurationSeconds: Int,
+    onModeSelected: (RecorderMode) -> Unit,
     onFolderSelected: (MediaFolder) -> Unit,
     onAddFolderClick: () -> Unit,
     onTakePhotoClick: () -> Unit,
@@ -71,347 +83,399 @@ fun DualBottomBars(
     onRecordAudioClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    // Pulse animation for recording indicators
+    val colorScheme = MaterialTheme.colorScheme
+
     val transition = rememberInfiniteTransition(label = "pulse_recording")
     val pulseScale by transition.animateFloat(
         initialValue = 1f,
-        targetValue = 1.15f,
+        targetValue = 1.14f,
         animationSpec = infiniteRepeatable(
-            animation = tween(500, easing = FastOutSlowInEasing),
+            animation = tween(550, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse
         ),
         label = "pulse_scale"
     )
 
+    var dragAccumulator by remember { mutableFloatStateOf(0f) }
+
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(
-                Brush.verticalGradient(
-                    colors = listOf(
-                        Color.Transparent,
-                        Color(0xCC090C10),
-                        Color(0xF0090C10),
-                        Color(0xFF090C10)
-                    )
-                )
-            )
             .navigationBarsPadding(),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Active recording status strip if video or audio is currently recording
+        // Active video recording duration badge
         if (captureState == CaptureState.RECORDING_VIDEO) {
             val mins = videoDurationSeconds / 60
             val secs = videoDurationSeconds % 60
             Surface(
-                color = Color(0xFFEF4444).copy(alpha = 0.2f),
-                shape = RoundedCornerShape(16.dp),
-                border = BorderStroke(1.dp, Color(0xFFEF4444)),
-                modifier = Modifier.padding(bottom = 12.dp)
+                color = colorScheme.errorContainer,
+                contentColor = colorScheme.onErrorContainer,
+                shape = MaterialTheme.shapes.extraLarge,
+                tonalElevation = 4.dp,
+                modifier = Modifier.padding(bottom = 10.dp)
             ) {
                 Row(
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
                         imageVector = Icons.Default.FiberManualRecord,
-                        contentDescription = "Recording",
-                        tint = Color(0xFFEF4444),
-                        modifier = Modifier.size(12.dp).scale(pulseScale)
+                        contentDescription = "Recording video",
+                        tint = colorScheme.error,
+                        modifier = Modifier
+                            .size(14.dp)
+                            .scale(pulseScale)
                     )
-                    Spacer(modifier = Modifier.width(6.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "REC VIDEO  " + String.format("%02d:%02d", mins, secs),
-                        color = Color.White,
-                        fontSize = 12.sp,
+                        text = "REC VIDEO  " + String.format(Locale.US, "%02d:%02d", mins, secs),
+                        style = MaterialTheme.typography.labelLarge,
                         fontWeight = FontWeight.Bold
                     )
                 }
             }
         }
 
-        // ==========================================
-        // UPPER BOTTOM BAR: 3 Capture Action Buttons
-        // (Take Photo, Record Video, Record Audio)
-        // ==========================================
+        // =========================================================================
+        // UPPER BOTTOM BAR (On top of the folder bar):
+        // Ordered: 1. Record Audio (Default)  ->  2. Take Photo  ->  3. Record Video
+        // Supports scrolling/swiping left & right to switch modes as well as tapping
+        // =========================================================================
         Surface(
-            color = Color(0xFF161B22).copy(alpha = 0.92f),
-            shape = RoundedCornerShape(28.dp),
-            border = BorderStroke(1.dp, Color(0xFF30363D)),
-            shadowElevation = 8.dp,
+            color = colorScheme.surface.copy(alpha = 0.94f),
+            contentColor = colorScheme.onSurface,
+            shape = MaterialTheme.shapes.extraLarge,
+            tonalElevation = 4.dp,
+            shadowElevation = 6.dp,
+            border = BorderStroke(1.dp, colorScheme.outlineVariant.copy(alpha = 0.6f)),
             modifier = Modifier
-                .padding(horizontal = 24.dp)
+                .padding(horizontal = 20.dp)
                 .fillMaxWidth()
+                .pointerInput(currentMode, captureState) {
+                    detectHorizontalDragGestures(
+                        onDragStart = { dragAccumulator = 0f },
+                        onDragEnd = {
+                            if (captureState == CaptureState.IDLE) {
+                                // Scrolling/swiping left (negative drag) advances Audio -> Photo -> Video
+                                if (dragAccumulator < -60f) {
+                                    val nextIndex = (currentMode.index + 1).coerceAtMost(2)
+                                    onModeSelected(RecorderMode.fromIndex(nextIndex))
+                                } else if (dragAccumulator > 60f) {
+                                    val prevIndex = (currentMode.index - 1).coerceAtLeast(0)
+                                    onModeSelected(RecorderMode.fromIndex(prevIndex))
+                                }
+                            }
+                            dragAccumulator = 0f
+                        },
+                        onHorizontalDrag = { _, dragAmount ->
+                            dragAccumulator += dragAmount
+                        }
+                    )
+                }
+                .testTag("upper_capture_bottom_bar")
         ) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // 1. TAKE PHOTO BUTTON
-                val isPhotoEnabled = captureState == CaptureState.IDLE
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(16.dp))
-                        .clickable(enabled = isPhotoEnabled) { onTakePhotoClick() }
-                        .padding(horizontal = 8.dp, vertical = 6.dp)
-                        .testTag("photo_capture_button")
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(54.dp)
-                            .clip(CircleShape)
-                            .background(
-                                if (isPhotoEnabled) Color(0xFF21262D) else Color(0xFF161B22)
-                            )
-                            .border(
-                                2.dp,
-                                if (isPhotoEnabled) Color(0xFF38BDF8) else Color(0xFF30363D),
-                                CircleShape
-                            ),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.CameraAlt,
-                            contentDescription = "Take Photo",
-                            tint = if (isPhotoEnabled) Color(0xFF38BDF8) else Color(0xFF6E7681),
-                            modifier = Modifier.size(26.dp)
-                        )
-                    }
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "Photo",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = if (isPhotoEnabled) Color(0xFFF0F6FC) else Color(0xFF6E7681)
-                    )
-                }
-
-                // 2. RECORD VIDEO BUTTON (Toggles Record / Stop)
-                val isVideoRecording = captureState == CaptureState.RECORDING_VIDEO
-                val isVideoEnabled = captureState == CaptureState.IDLE || isVideoRecording
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(16.dp))
-                        .clickable(enabled = isVideoEnabled) { onRecordVideoClick() }
-                        .padding(horizontal = 8.dp, vertical = 6.dp)
-                        .testTag("video_record_button")
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(54.dp)
-                            .clip(CircleShape)
-                            .background(
-                                if (isVideoRecording) Color(0xFFEF4444)
-                                else if (isVideoEnabled) Color(0xFF21262D)
-                                else Color(0xFF161B22)
-                            )
-                            .border(
-                                2.dp,
-                                if (isVideoRecording) Color.White
-                                else if (isVideoEnabled) Color(0xFFEF4444)
-                                else Color(0xFF30363D),
-                                CircleShape
-                            ),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        if (isVideoRecording) {
-                            Icon(
-                                imageVector = Icons.Default.Stop,
-                                contentDescription = "Stop Video Recording",
-                                tint = Color.White,
-                                modifier = Modifier.size(28.dp).scale(pulseScale)
-                            )
-                        } else {
-                            Icon(
-                                imageVector = Icons.Default.Videocam,
-                                contentDescription = "Record Video",
-                                tint = if (isVideoEnabled) Color(0xFFEF4444) else Color(0xFF6E7681),
-                                modifier = Modifier.size(28.dp)
-                            )
-                        }
-                    }
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = if (isVideoRecording) "Stop" else "Video",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = if (isVideoRecording) Color(0xFFEF4444) else if (isVideoEnabled) Color(0xFFF0F6FC) else Color(0xFF6E7681)
-                    )
-                }
-
-                // 3. RECORD AUDIO BUTTON (Toggles Record / Stop)
+                // 1. AUDIO RECORDING BUTTON (First & selected by default)
+                val isAudioMode = currentMode == RecorderMode.AUDIO
                 val isAudioRecording = captureState == CaptureState.RECORDING_AUDIO
                 val isAudioEnabled = captureState == CaptureState.IDLE || isAudioRecording
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(16.dp))
-                        .clickable(enabled = isAudioEnabled) { onRecordAudioClick() }
-                        .padding(horizontal = 8.dp, vertical = 6.dp)
-                        .testTag("audio_record_button")
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(54.dp)
-                            .clip(CircleShape)
-                            .background(
-                                if (isAudioRecording) Color(0xFF10B981)
-                                else if (isAudioEnabled) Color(0xFF21262D)
-                                else Color(0xFF161B22)
-                            )
-                            .border(
-                                2.dp,
-                                if (isAudioRecording) Color.White
-                                else if (isAudioEnabled) Color(0xFF10B981)
-                                else Color(0xFF30363D),
-                                CircleShape
-                            ),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        if (isAudioRecording) {
-                            Icon(
-                                imageVector = Icons.Default.Stop,
-                                contentDescription = "Stop Audio Recording",
-                                tint = Color.White,
-                                modifier = Modifier.size(28.dp).scale(pulseScale)
-                            )
+
+                ModeCaptureButton(
+                    label = if (isAudioRecording) "Stop Audio" else "Audio",
+                    isSelectedMode = isAudioMode,
+                    isActivelyRecording = isAudioRecording,
+                    enabled = isAudioEnabled,
+                    activeIcon = if (isAudioRecording) Icons.Default.Stop else Icons.Default.Mic,
+                    inactiveIcon = Icons.Outlined.Mic,
+                    pulseScale = pulseScale,
+                    testTag = "audio_record_button",
+                    onClick = {
+                        if (!isAudioMode && captureState == CaptureState.IDLE) {
+                            onModeSelected(RecorderMode.AUDIO)
                         } else {
-                            Icon(
-                                imageVector = Icons.Default.Mic,
-                                contentDescription = "Record Audio",
-                                tint = if (isAudioEnabled) Color(0xFF10B981) else Color(0xFF6E7681),
-                                modifier = Modifier.size(28.dp)
-                            )
+                            onRecordAudioClick()
                         }
                     }
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = if (isAudioRecording) "Stop" else "Audio",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = if (isAudioRecording) Color(0xFF10B981) else if (isAudioEnabled) Color(0xFFF0F6FC) else Color(0xFF6E7681)
-                    )
-                }
+                )
+
+                // 2. PHOTO CAPTURE BUTTON (Second — scroll left from Audio)
+                val isPhotoMode = currentMode == RecorderMode.PHOTO
+                val isPhotoEnabled = captureState == CaptureState.IDLE
+
+                ModeCaptureButton(
+                    label = "Photo",
+                    isSelectedMode = isPhotoMode,
+                    isActivelyRecording = false,
+                    enabled = isPhotoEnabled,
+                    activeIcon = Icons.Default.CameraAlt,
+                    inactiveIcon = Icons.Outlined.CameraAlt,
+                    pulseScale = 1f,
+                    testTag = "photo_capture_button",
+                    onClick = {
+                        if (!isPhotoMode) {
+                            onModeSelected(RecorderMode.PHOTO)
+                        } else {
+                            onTakePhotoClick()
+                        }
+                    }
+                )
+
+                // 3. VIDEO RECORDING BUTTON (Third — scroll left from Photo)
+                val isVideoMode = currentMode == RecorderMode.VIDEO
+                val isVideoRecording = captureState == CaptureState.RECORDING_VIDEO
+                val isVideoEnabled = captureState == CaptureState.IDLE || isVideoRecording
+
+                ModeCaptureButton(
+                    label = if (isVideoRecording) "Stop Video" else "Video",
+                    isSelectedMode = isVideoMode,
+                    isActivelyRecording = isVideoRecording,
+                    enabled = isVideoEnabled,
+                    activeIcon = if (isVideoRecording) Icons.Default.Stop else Icons.Default.Videocam,
+                    inactiveIcon = Icons.Outlined.Videocam,
+                    pulseScale = pulseScale,
+                    testTag = "video_record_button",
+                    onClick = {
+                        if (!isVideoMode && captureState == CaptureState.IDLE) {
+                            onModeSelected(RecorderMode.VIDEO)
+                        } else {
+                            onRecordVideoClick()
+                        }
+                    }
+                )
             }
         }
 
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(modifier = Modifier.height(8.dp))
 
-        // ==========================================
-        // LOWER BOTTOM BAR: Scrollable Folder Buttons
-        // (All the way at the bottom)
-        // ==========================================
-        Box(
+        // =========================================================================
+        // LOWER BOTTOM BAR (All the way at the bottom):
+        // Scrollable Material 3 Folder Buttons
+        // =========================================================================
+        Surface(
+            color = colorScheme.surface,
+            contentColor = colorScheme.onSurface,
+            tonalElevation = 2.dp,
+            border = BorderStroke(1.dp, colorScheme.outlineVariant.copy(alpha = 0.4f)),
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(bottom = 8.dp)
+                .testTag("lower_folder_bottom_bar")
         ) {
             LazyRow(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp),
                 contentPadding = PaddingValues(horizontal = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                items(folders, key = { it.id }) { folder ->
-                    val isSelected = folder.id == selectedFolderId
-                    val count = folderItemCounts[folder.id] ?: 0
-                    val folderColor = try {
-                        Color(android.graphics.Color.parseColor(folder.colorHex))
-                    } catch (e: Exception) {
-                        Color(0xFF38BDF8)
+                if (folders.isEmpty()) {
+                    item {
+                        AssistChip(
+                            onClick = onAddFolderClick,
+                            label = {
+                                Text(
+                                    text = "Specify at least 1 folder (Name & /sdcard Location)",
+                                    style = MaterialTheme.typography.labelLarge
+                                )
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Default.Add,
+                                    contentDescription = "Specify Folder",
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            },
+                            colors = AssistChipDefaults.assistChipColors(
+                                containerColor = colorScheme.errorContainer,
+                                labelColor = colorScheme.onErrorContainer,
+                                leadingIconContentColor = colorScheme.onErrorContainer
+                            ),
+                            modifier = Modifier.testTag("empty_folder_prompt_chip")
+                        )
                     }
+                } else {
+                    items(folders, key = { it.id }) { folder ->
+                        val isSelected = folder.id == selectedFolderId
+                        val count = folderItemCounts[folder.id] ?: 0
 
-                    Surface(
-                        color = if (isSelected) folderColor.copy(alpha = 0.22f) else Color(0xFF161B22),
-                        shape = RoundedCornerShape(20.dp),
-                        border = BorderStroke(
-                            width = if (isSelected) 2.dp else 1.dp,
-                            color = if (isSelected) folderColor else Color(0xFF30363D)
-                        ),
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(20.dp))
-                            .clickable { onFolderSelected(folder) }
-                            .testTag("folder_item_button_${folder.id}")
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                imageVector = if (isSelected) Icons.Default.Check else Icons.Default.Folder,
-                                contentDescription = folder.name,
-                                tint = folderColor,
-                                modifier = Modifier.size(17.dp)
-                            )
-                            Spacer(modifier = Modifier.width(7.dp))
-                            Text(
-                                text = folder.name,
-                                color = if (isSelected) Color.White else Color(0xFFC9D1D9),
-                                fontSize = 13.sp,
-                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            if (count > 0) {
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Box(
-                                    modifier = Modifier
-                                        .clip(CircleShape)
-                                        .background(
-                                            if (isSelected) folderColor.copy(alpha = 0.4f)
-                                            else Color(0xFF21262D)
-                                        )
-                                        .padding(horizontal = 6.dp, vertical = 1.dp)
-                                ) {
+                        ElevatedFilterChip(
+                            selected = isSelected,
+                            onClick = { onFolderSelected(folder) },
+                            label = {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
                                     Text(
-                                        text = "$count",
-                                        color = if (isSelected) Color.White else Color(0xFF8B949E),
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.SemiBold
+                                        text = folder.name,
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
+                                    if (count > 0) {
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Badge(
+                                            containerColor = if (isSelected) {
+                                                colorScheme.primary
+                                            } else {
+                                                colorScheme.surfaceVariant
+                                            },
+                                            contentColor = if (isSelected) {
+                                                colorScheme.onPrimary
+                                            } else {
+                                                colorScheme.onSurfaceVariant
+                                            }
+                                        ) {
+                                            Text(text = "$count")
+                                        }
+                                    }
                                 }
-                            }
-                        }
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = if (isSelected) Icons.Default.Check else Icons.Default.Folder,
+                                    contentDescription = folder.name,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            },
+                            colors = FilterChipDefaults.elevatedFilterChipColors(
+                                selectedContainerColor = colorScheme.primaryContainer,
+                                selectedLabelColor = colorScheme.onPrimaryContainer,
+                                selectedLeadingIconColor = colorScheme.onPrimaryContainer
+                            ),
+                            modifier = Modifier.testTag("folder_item_button_${folder.id}")
+                        )
                     }
-                }
 
-                // Add Folder Button
-                item {
-                    Surface(
-                        color = Color(0xFF21262D),
-                        shape = RoundedCornerShape(20.dp),
-                        border = BorderStroke(1.dp, Color(0xFF30363D)),
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(20.dp))
-                            .clickable { onAddFolderClick() }
-                            .testTag("add_folder_button")
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Add,
-                                contentDescription = "Add Folder",
-                                tint = Color(0xFF38BDF8),
-                                modifier = Modifier.size(17.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = "New",
-                                color = Color(0xFF38BDF8),
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                        }
+                    // Add Folder Chip at the end of the scrollable list
+                    item {
+                        AssistChip(
+                            onClick = onAddFolderClick,
+                            label = {
+                                Text(
+                                    text = "Add Folder",
+                                    style = MaterialTheme.typography.labelLarge
+                                )
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Default.Add,
+                                    contentDescription = "Add Folder",
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            },
+                            modifier = Modifier.testTag("add_folder_button")
+                        )
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun ModeCaptureButton(
+    label: String,
+    isSelectedMode: Boolean,
+    isActivelyRecording: Boolean,
+    enabled: Boolean,
+    activeIcon: androidx.compose.ui.graphics.vector.ImageVector,
+    inactiveIcon: androidx.compose.ui.graphics.vector.ImageVector,
+    pulseScale: Float,
+    testTag: String,
+    onClick: () -> Unit
+) {
+    val colorScheme = MaterialTheme.colorScheme
+    val buttonSize by animateDpAsState(
+        targetValue = if (isSelectedMode) 56.dp else 48.dp,
+        label = "mode_button_size"
+    )
+
+    val containerColor by animateColorAsState(
+        targetValue = when {
+            isActivelyRecording -> colorScheme.error
+            isSelectedMode -> colorScheme.primary
+            else -> colorScheme.secondaryContainer
+        },
+        label = "mode_container_color"
+    )
+
+    val contentColor by animateColorAsState(
+        targetValue = when {
+            isActivelyRecording -> colorScheme.onError
+            isSelectedMode -> colorScheme.onPrimary
+            else -> colorScheme.onSecondaryContainer
+        },
+        label = "mode_content_color"
+    )
+
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.padding(horizontal = 8.dp)
+    ) {
+        if (isSelectedMode || isActivelyRecording) {
+            FilledIconButton(
+                onClick = onClick,
+                enabled = enabled,
+                shape = if (isActivelyRecording) MaterialTheme.shapes.large else CircleShape,
+                colors = IconButtonDefaults.filledIconButtonColors(
+                    containerColor = containerColor,
+                    contentColor = contentColor
+                ),
+                modifier = Modifier
+                    .size(buttonSize)
+                    .scale(if (isActivelyRecording) pulseScale else 1f)
+                    .testTag(testTag)
+            ) {
+                Icon(
+                    imageVector = activeIcon,
+                    contentDescription = label,
+                    modifier = Modifier.size(26.dp)
+                )
+            }
+        } else {
+            FilledTonalIconButton(
+                onClick = onClick,
+                enabled = enabled,
+                shape = CircleShape,
+                colors = IconButtonDefaults.filledTonalIconButtonColors(
+                    containerColor = containerColor,
+                    contentColor = contentColor
+                ),
+                modifier = Modifier
+                    .size(buttonSize)
+                    .testTag(testTag)
+            ) {
+                Icon(
+                    imageVector = inactiveIcon,
+                    contentDescription = label,
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(4.dp))
+
+        Surface(
+            color = if (isSelectedMode) colorScheme.primaryContainer else colorScheme.surface.copy(alpha = 0f),
+            shape = MaterialTheme.shapes.small
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = if (isSelectedMode) FontWeight.Bold else FontWeight.Medium,
+                color = when {
+                    isActivelyRecording -> colorScheme.error
+                    isSelectedMode -> colorScheme.onPrimaryContainer
+                    else -> colorScheme.onSurfaceVariant
+                },
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+            )
         }
     }
 }

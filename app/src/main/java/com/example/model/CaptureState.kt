@@ -1,5 +1,23 @@
 package com.example.model
 
+/**
+ * Modes ordered as requested:
+ * 0 -> AUDIO (default when app opens)
+ * 1 -> PHOTO (scroll left from Audio)
+ * 2 -> VIDEO (scroll left from Photo)
+ */
+enum class RecorderMode(val index: Int, val title: String) {
+    AUDIO(0, "Audio"),
+    PHOTO(1, "Photo"),
+    VIDEO(2, "Video");
+
+    companion object {
+        fun fromIndex(index: Int): RecorderMode {
+            return entries.find { it.index == index } ?: AUDIO
+        }
+    }
+}
+
 enum class CaptureState {
     IDLE,
     RECORDING_VIDEO,
