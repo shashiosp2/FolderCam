@@ -83,5 +83,14 @@ class ExampleRobolectricTest {
 
         viewModel.setRecorderMode(RecorderMode.VIDEO)
         assertEquals(RecorderMode.VIDEO, viewModel.recorderMode.value)
+
+        // Verify default 12MP photo and 4K 30fps video configuration
+        val camState = viewModel.cameraManager.cameraState.value
+        assertEquals("12MP", camState.photoResolution)
+        assertEquals("4K 30fps", camState.videoResolution)
+        assertEquals(4000, com.example.camera.CameraManager.DEFAULT_PHOTO_12MP_SIZE.width)
+        assertEquals(3000, com.example.camera.CameraManager.DEFAULT_PHOTO_12MP_SIZE.height)
+        assertEquals(30, com.example.camera.CameraManager.DEFAULT_VIDEO_30FPS_RANGE.lower)
+        assertEquals(30, com.example.camera.CameraManager.DEFAULT_VIDEO_30FPS_RANGE.upper)
     }
 }

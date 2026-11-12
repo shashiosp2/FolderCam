@@ -294,6 +294,8 @@ class FolderRepository(private val context: Context) {
         root.put("version", 1)
         root.put("configPath", "/sdcard/.foldercam")
         root.put("isDarkTheme", _isDarkTheme.value)
+        root.put("photoResolution", "12MP")
+        root.put("videoResolution", "4K 30fps")
         root.put("selectedFolderId", _selectedFolderId.value ?: "")
 
         val array = JSONArray()

@@ -11,7 +11,6 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -41,9 +40,11 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Badge
 import androidx.compose.material3.ElevatedFilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
@@ -62,6 +63,8 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.camera.CameraUiState
+import com.example.camera.LensOption
 import com.example.model.CaptureState
 import com.example.model.MediaFolder
 import com.example.model.RecorderMode
@@ -75,6 +78,8 @@ fun DualBottomBars(
     currentMode: RecorderMode,
     captureState: CaptureState,
     videoDurationSeconds: Int,
+    cameraUiState: CameraUiState,
+    onLensSelected: (LensOption) -> Unit,
     onModeSelected: (RecorderMode) -> Unit,
     onFolderSelected: (MediaFolder) -> Unit,
     onAddFolderClick: () -> Unit,
@@ -113,7 +118,7 @@ fun DualBottomBars(
                 contentColor = colorScheme.onErrorContainer,
                 shape = MaterialTheme.shapes.extraLarge,
                 tonalElevation = 4.dp,
-                modifier = Modifier.padding(bottom = 10.dp)
+                modifier = Modifier.padding(bottom = 8.dp)
             ) {
                 Row(
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
@@ -138,6 +143,72 @@ fun DualBottomBars(
         }
 
         // =========================================================================
+        // MULTI-LENS SELECTOR (Ultrawide 0.5x -> Wide 1x -> Zoom 2x/3x/5x/10x)
+        // + Default Resolution Badge (12MP for Photo, 4K 30fps for Video)
+        // =========================================================================
+        if (currentMode == RecorderMode.PHOTO || currentMode == RecorderMode.VIDEO) {
+            Surface(
+                color = colorScheme.surface.copy(alpha = 0.88f),
+                contentColor = colorScheme.onSurface,
+                shape = MaterialTheme.shapes.extraLarge,
+                tonalElevation = 3.dp,
+                border = BorderStroke(1.dp, colorScheme.outlineVariant.copy(alpha = 0.5f)),
+                modifier = Modifier
+                    .padding(bottom = 8.dp)
+                    .testTag("lens_selector_bar")
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    cameraUiState.lensOptions.forEach { lens ->
+                        val isSelected = cameraUiState.selectedLensId == lens.id
+                        FilterChip(
+                            selected = isSelected,
+                            onClick = { onLensSelected(lens) },
+                            label = {
+                                Text(
+                                    text = if (isSelected) {
+                                        String.format(Locale.US, "%.1fx", cameraUiState.currentZoomRatio)
+                                            .removeSuffix(".0x") + (if (cameraUiState.currentZoomRatio % 1f == 0f) "x" else "")
+                                    } else {
+                                        lens.label
+                                    },
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                                )
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = colorScheme.primaryContainer,
+                                selectedLabelColor = colorScheme.onPrimaryContainer
+                            ),
+                            modifier = Modifier.testTag("lens_button_${lens.id}")
+                        )
+                    }
+
+                    // Active Resolution Pill (12MP for Photo, 4K 30fps for Video)
+                    Badge(
+                        containerColor = colorScheme.secondaryContainer,
+                        contentColor = colorScheme.onSecondaryContainer,
+                        modifier = Modifier.padding(start = 4.dp)
+                    ) {
+                        Text(
+                            text = if (currentMode == RecorderMode.PHOTO) {
+                                cameraUiState.photoResolution
+                            } else {
+                                cameraUiState.videoResolution
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+                }
+            }
+        }
+
+        // =========================================================================
         // UPPER BOTTOM BAR (On top of the folder bar):
         // Ordered: 1. Record Audio (Default)  ->  2. Take Photo  ->  3. Record Video
         // Supports scrolling/swiping left & right to switch modes as well as tapping
@@ -157,7 +228,6 @@ fun DualBottomBars(
                         onDragStart = { dragAccumulator = 0f },
                         onDragEnd = {
                             if (captureState == CaptureState.IDLE) {
-                                // Scrolling/swiping left (negative drag) advances Audio -> Photo -> Video
                                 if (dragAccumulator < -60f) {
                                     val nextIndex = (currentMode.index + 1).coerceAtMost(2)
                                     onModeSelected(RecorderMode.fromIndex(nextIndex))
@@ -352,7 +422,6 @@ fun DualBottomBars(
                         )
                     }
 
-                    // Add Folder Chip at the end of the scrollable list
                     item {
                         AssistChip(
                             onClick = onAddFolderClick,

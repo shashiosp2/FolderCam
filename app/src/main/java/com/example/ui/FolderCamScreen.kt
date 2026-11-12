@@ -12,6 +12,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -58,6 +59,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -154,6 +156,7 @@ fun FolderCamScreen(
     }
 
     val cameraManager = viewModel.cameraManager
+    val cameraUiState by cameraManager.cameraState.collectAsState()
     var previewViewRef by remember { mutableStateOf<PreviewView?>(null) }
     var isFlashOn by remember { mutableStateOf(false) }
 
@@ -270,6 +273,10 @@ fun FolderCamScreen(
                 currentMode = recorderMode,
                 captureState = captureState,
                 videoDurationSeconds = videoDuration,
+                cameraUiState = cameraUiState,
+                onLensSelected = { lens ->
+                    cameraManager.selectLens(lens)
+                },
                 onModeSelected = { mode ->
                     viewModel.setRecorderMode(mode)
                 },
@@ -384,10 +391,30 @@ fun FolderCamScreen(
                         )
                     }
                     RecorderMode.PHOTO -> {
-                        Box(modifier = Modifier.fillMaxSize())
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .pointerInput(Unit) {
+                                    detectTransformGestures { _, _, zoom, _ ->
+                                        if (zoom != 1.0f) {
+                                            cameraManager.applyPinchZoom(zoom)
+                                        }
+                                    }
+                                }
+                        )
                     }
                     RecorderMode.VIDEO -> {
-                        Box(modifier = Modifier.fillMaxSize())
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .pointerInput(Unit) {
+                                    detectTransformGestures { _, _, zoom, _ ->
+                                        if (zoom != 1.0f) {
+                                            cameraManager.applyPinchZoom(zoom)
+                                        }
+                                    }
+                                }
+                        )
                     }
                 }
             }
