@@ -2,6 +2,7 @@ package com.example.ui
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.view.PreviewView
@@ -14,7 +15,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
@@ -27,17 +27,15 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.FlashOff
 import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.FlipCameraAndroid
 import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.SdStorage
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Videocam
-import androidx.compose.material.icons.outlined.Swipe
-import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
@@ -47,9 +45,6 @@ import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -64,14 +59,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import com.example.camera.CameraManager
 import com.example.model.CaptureState
 import com.example.model.MediaType
 import com.example.model.RecorderMode
@@ -88,11 +80,11 @@ fun FolderCamScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
     val colorScheme = MaterialTheme.colorScheme
 
     val folders by viewModel.folders.collectAsState()
     val selectedFolder by viewModel.selectedFolder.collectAsState()
+    val isDarkTheme by viewModel.isDarkTheme.collectAsState()
     val recorderMode by viewModel.recorderMode.collectAsState()
     val captureState by viewModel.captureState.collectAsState()
     val audioStatus by viewModel.audioStatus.collectAsState()
@@ -125,10 +117,18 @@ fun FolderCamScreen(
     }
 
     LaunchedEffect(Unit) {
-        if (!hasCameraPermission || !hasAudioPermission) {
-            permissionLauncher.launch(
-                arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
-            )
+        val permsToRequest = mutableListOf<String>()
+        if (!hasCameraPermission) permsToRequest.add(Manifest.permission.CAMERA)
+        if (!hasAudioPermission) permsToRequest.add(Manifest.permission.RECORD_AUDIO)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val hasNotifPerm = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!hasNotifPerm) permsToRequest.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        if (permsToRequest.isNotEmpty()) {
+            permissionLauncher.launch(permsToRequest.toTypedArray())
         }
     }
 
@@ -153,7 +153,7 @@ fun FolderCamScreen(
         }
     }
 
-    val cameraManager = remember { CameraManager(context) }
+    val cameraManager = viewModel.cameraManager
     var previewViewRef by remember { mutableStateOf<PreviewView?>(null) }
     var isFlashOn by remember { mutableStateOf(false) }
 
@@ -168,153 +168,99 @@ fun FolderCamScreen(
         modifier = modifier.fillMaxSize(),
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(colorScheme.surface.copy(alpha = 0.9f))
-            ) {
-                TopAppBar(
-                    title = {
-                        Column {
-                            Text(
-                                text = "FolderCam",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold
-                            )
-                            val activeFolder = selectedFolder
-                            Text(
-                                text = if (activeFolder != null) {
-                                    "${activeFolder.name} (${activeFolder.sdcardPath})"
-                                } else {
-                                    "Specify at least 1 folder in Settings"
-                                },
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (activeFolder != null) {
-                                    colorScheme.primary
-                                } else {
-                                    colorScheme.error
-                                },
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                    },
-                    actions = {
-                        // Only show camera flash & flip when in Photo or Video mode
-                        if (recorderMode != RecorderMode.AUDIO) {
-                            FilledTonalIconButton(
-                                onClick = {
-                                    isFlashOn = !isFlashOn
-                                    cameraManager.toggleTorch(isFlashOn)
-                                },
-                                modifier = Modifier
-                                    .padding(end = 4.dp)
-                                    .testTag("flash_toggle_button")
-                            ) {
-                                Icon(
-                                    imageVector = if (isFlashOn) Icons.Default.FlashOn else Icons.Default.FlashOff,
-                                    contentDescription = "Toggle Flash"
-                                )
-                            }
-
-                            FilledTonalIconButton(
-                                onClick = {
-                                    previewViewRef?.let { cameraManager.switchCamera(lifecycleOwner, it) }
-                                },
-                                modifier = Modifier
-                                    .padding(end = 4.dp)
-                                    .testTag("switch_camera_button")
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.FlipCameraAndroid,
-                                    contentDescription = "Switch Camera"
-                                )
-                            }
-                        }
-
-                        // Gallery Icon Button with M3 Badge
-                        val mediaCount = currentFolderMedia.size
+            TopAppBar(
+                title = {
+                    Text(
+                        text = "FolderCam",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                },
+                actions = {
+                    // Only show camera flash & flip when in Photo or Video mode
+                    if (recorderMode != RecorderMode.AUDIO) {
                         FilledTonalIconButton(
-                            onClick = { viewModel.openGallery() },
+                            onClick = {
+                                isFlashOn = !isFlashOn
+                                cameraManager.toggleTorch(isFlashOn)
+                            },
                             modifier = Modifier
                                 .padding(end = 4.dp)
-                                .testTag("gallery_button")
-                        ) {
-                            BadgedBox(
-                                badge = {
-                                    if (mediaCount > 0) {
-                                        Badge { Text("$mediaCount") }
-                                    }
-                                }
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.PhotoLibrary,
-                                    contentDescription = "Gallery"
-                                )
-                            }
-                        }
-
-                        // Folder Settings Icon Button
-                        FilledTonalIconButton(
-                            onClick = { viewModel.openSettings() },
-                            modifier = Modifier
-                                .padding(end = 8.dp)
-                                .testTag("settings_button")
+                                .testTag("flash_toggle_button")
                         ) {
                             Icon(
-                                imageVector = Icons.Default.Settings,
-                                contentDescription = "Folder Settings"
+                                imageVector = if (isFlashOn) Icons.Default.FlashOn else Icons.Default.FlashOff,
+                                contentDescription = "Toggle Flash"
                             )
                         }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = colorScheme.surface.copy(alpha = 0.85f)
-                    )
-                )
 
-                // Material 3 Segmented Mode Indicator (Audio -> Photo -> Video)
-                SingleChoiceSegmentedButtonRow(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 24.dp, vertical = 6.dp)
-                        .testTag("mode_segmented_row")
-                ) {
-                    RecorderMode.entries.forEachIndexed { index, mode ->
-                        SegmentedButton(
-                            selected = recorderMode == mode,
+                        FilledTonalIconButton(
                             onClick = {
-                                if (captureState == CaptureState.IDLE) {
-                                    viewModel.setRecorderMode(mode)
-                                }
+                                previewViewRef?.let { cameraManager.switchCamera(it) }
                             },
-                            shape = SegmentedButtonDefaults.itemShape(
-                                index = index,
-                                count = RecorderMode.entries.size
-                            ),
-                            icon = {
-                                SegmentedButtonDefaults.Icon(active = recorderMode == mode) {
-                                    Icon(
-                                        imageVector = when (mode) {
-                                            RecorderMode.AUDIO -> Icons.Default.Mic
-                                            RecorderMode.PHOTO -> Icons.Default.CameraAlt
-                                            RecorderMode.VIDEO -> Icons.Default.Videocam
-                                        },
-                                        contentDescription = null,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                }
-                            },
-                            label = {
-                                Text(
-                                    text = mode.title,
-                                    style = MaterialTheme.typography.labelLarge
-                                )
-                            },
-                            modifier = Modifier.testTag("mode_tab_${mode.name.lowercase()}")
+                            modifier = Modifier
+                                .padding(end = 4.dp)
+                                .testTag("switch_camera_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.FlipCameraAndroid,
+                                contentDescription = "Switch Camera"
+                            )
+                        }
+                    }
+
+                    // Light / Dark Mode Toggle Button
+                    FilledTonalIconButton(
+                        onClick = { viewModel.toggleDarkTheme() },
+                        modifier = Modifier
+                            .padding(end = 4.dp)
+                            .testTag("theme_toggle_button")
+                    ) {
+                        Icon(
+                            imageVector = if (isDarkTheme) Icons.Default.LightMode else Icons.Default.DarkMode,
+                            contentDescription = if (isDarkTheme) "Switch to Light Mode" else "Switch to Dark Mode"
                         )
                     }
-                }
-            }
+
+                    // Gallery Icon Button with M3 Badge
+                    val mediaCount = currentFolderMedia.size
+                    FilledTonalIconButton(
+                        onClick = { viewModel.openGallery() },
+                        modifier = Modifier
+                            .padding(end = 4.dp)
+                            .testTag("gallery_button")
+                    ) {
+                        BadgedBox(
+                            badge = {
+                                if (mediaCount > 0) {
+                                    Badge { Text("$mediaCount") }
+                                }
+                            }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.PhotoLibrary,
+                                contentDescription = "Gallery"
+                            )
+                        }
+                    }
+
+                    // Folder Settings Icon Button
+                    FilledTonalIconButton(
+                        onClick = { viewModel.openSettings() },
+                        modifier = Modifier
+                            .padding(end = 8.dp)
+                            .testTag("settings_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Settings,
+                            contentDescription = "Folder Settings"
+                        )
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = colorScheme.surface.copy(alpha = 0.85f)
+                )
+            )
         },
         bottomBar = {
             DualBottomBars(
@@ -392,8 +338,12 @@ fun FolderCamScreen(
                         factory = { ctx ->
                             PreviewView(ctx).apply {
                                 previewViewRef = this
-                                cameraManager.initialize(lifecycleOwner, this)
+                                cameraManager.attachPreviewView(this)
                             }
+                        },
+                        update = { view ->
+                            previewViewRef = view
+                            cameraManager.attachPreviewView(view)
                         },
                         modifier = Modifier
                             .fillMaxSize()
@@ -412,8 +362,8 @@ fun FolderCamScreen(
 
             // HorizontalPager enabling swipe left/right between:
             // Page 0: Audio (Blank viewfinder + live waveform, selected by default)
-            // Page 1: Photo (Camera viewfinder + Photo HUD)
-            // Page 2: Video (Camera viewfinder + Video HUD)
+            // Page 1: Photo (Camera viewfinder)
+            // Page 2: Video (Camera viewfinder)
             HorizontalPager(
                 state = pagerState,
                 userScrollEnabled = captureState == CaptureState.IDLE,
@@ -434,20 +384,10 @@ fun FolderCamScreen(
                         )
                     }
                     RecorderMode.PHOTO -> {
-                        CameraModeOverlay(
-                            modeTitle = "PHOTO MODE",
-                            subtitle = "Swipe left for Video mode or right for Audio mode",
-                            targetFolder = selectedFolder,
-                            onOpenFolderSettings = { viewModel.openSettings() }
-                        )
+                        Box(modifier = Modifier.fillMaxSize())
                     }
                     RecorderMode.VIDEO -> {
-                        CameraModeOverlay(
-                            modeTitle = "VIDEO MODE",
-                            subtitle = "Swipe right for Photo or Audio mode",
-                            targetFolder = selectedFolder,
-                            onOpenFolderSettings = { viewModel.openSettings() }
-                        )
+                        Box(modifier = Modifier.fillMaxSize())
                     }
                 }
             }
@@ -539,6 +479,16 @@ fun FolderCamScreen(
             folders = folders,
             selectedFolderId = selectedFolder?.id,
             folderCounts = folderCounts,
+            isDarkTheme = isDarkTheme,
+            onToggleDarkTheme = { isDark ->
+                viewModel.setDarkTheme(isDark)
+            },
+            onRestoreFromSdcardFile = {
+                viewModel.restoreSettingsFromSdcard()
+            },
+            onRestoreFromJsonContent = { jsonText ->
+                viewModel.restoreSettingsFromJson(jsonText)
+            },
             onSelectFolder = { folder ->
                 viewModel.selectFolder(folder)
             },
@@ -592,77 +542,6 @@ fun FolderCamScreen(
                 viewModel.closeGallery()
             }
         )
-    }
-}
-
-@Composable
-private fun CameraModeOverlay(
-    modeTitle: String,
-    subtitle: String,
-    targetFolder: com.example.model.MediaFolder?,
-    onOpenFolderSettings: () -> Unit
-) {
-    val colorScheme = MaterialTheme.colorScheme
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(16.dp)
-    ) {
-        Surface(
-            color = colorScheme.surface.copy(alpha = 0.78f),
-            contentColor = colorScheme.onSurface,
-            shape = MaterialTheme.shapes.large,
-            tonalElevation = 2.dp,
-            modifier = Modifier.align(Alignment.BottomCenter)
-        ) {
-            Column(
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Text(
-                    text = modeTitle,
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.Bold,
-                    color = colorScheme.primary
-                )
-                Spacer(modifier = Modifier.height(2.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Outlined.Swipe,
-                        contentDescription = null,
-                        modifier = Modifier.size(14.dp),
-                        tint = colorScheme.onSurfaceVariant
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = subtitle,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = colorScheme.onSurfaceVariant
-                    )
-                }
-                Spacer(modifier = Modifier.height(4.dp))
-                AssistChip(
-                    onClick = onOpenFolderSettings,
-                    label = {
-                        Text(
-                            text = if (targetFolder != null) {
-                                "${targetFolder.name} -> ${targetFolder.sdcardPath}"
-                            } else {
-                                "Specify /sdcard folder"
-                            },
-                            style = MaterialTheme.typography.labelSmall
-                        )
-                    },
-                    leadingIcon = {
-                        Icon(
-                            imageVector = Icons.Default.Folder,
-                            contentDescription = null,
-                            modifier = Modifier.size(14.dp)
-                        )
-                    }
-                )
-            }
-        }
     }
 }
 

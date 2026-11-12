@@ -17,16 +17,47 @@ import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
 import java.io.File
+
+/**
+ * Custom LifecycleOwner that stays in RESUMED state so CameraX VideoCapture
+ * continues recording in the background when the user navigates to the Home screen
+ * while RecordingForegroundService is active.
+ */
+class BackgroundCameraLifecycleOwner : LifecycleOwner {
+    private val registry = LifecycleRegistry(this)
+
+    init {
+        registry.currentState = Lifecycle.State.CREATED
+    }
+
+    fun startAndResume() {
+        if (registry.currentState != Lifecycle.State.RESUMED) {
+            registry.currentState = Lifecycle.State.RESUMED
+        }
+    }
+
+    fun destroy() {
+        registry.currentState = Lifecycle.State.DESTROYED
+    }
+
+    override val lifecycle: Lifecycle
+        get() = registry
+}
 
 class CameraManager(private val context: Context) {
 
+    private val backgroundLifecycleOwner = BackgroundCameraLifecycleOwner()
     private var cameraProvider: ProcessCameraProvider? = null
     private var camera: Camera? = null
+    private var preview: Preview? = null
     private var imageCapture: ImageCapture? = null
     private var videoCapture: VideoCapture<Recorder>? = null
     private var currentRecording: Recording? = null
+    private var isCameraBound = false
 
     var isFrontCamera: Boolean = false
         private set
@@ -34,16 +65,25 @@ class CameraManager(private val context: Context) {
     var isTorchEnabled: Boolean = false
         private set
 
-    fun initialize(
-        lifecycleOwner: LifecycleOwner,
+    fun attachPreviewView(
         previewView: PreviewView,
         onInitialized: () -> Unit = {}
     ) {
+        previewView.implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+        backgroundLifecycleOwner.startAndResume()
+
+        if (cameraProvider != null && isCameraBound) {
+            // Re-attach surfaceProvider without interrupting active VideoCapture
+            preview?.surfaceProvider = previewView.surfaceProvider
+            onInitialized()
+            return
+        }
+
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
         cameraProviderFuture.addListener({
             try {
                 cameraProvider = cameraProviderFuture.get()
-                bindCamera(lifecycleOwner, previewView)
+                bindCamera(previewView)
                 onInitialized()
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -51,10 +91,11 @@ class CameraManager(private val context: Context) {
         }, ContextCompat.getMainExecutor(context))
     }
 
-    fun switchCamera(lifecycleOwner: LifecycleOwner, previewView: PreviewView) {
+    fun switchCamera(previewView: PreviewView) {
+        if (isRecordingVideo()) return
         isFrontCamera = !isFrontCamera
         isTorchEnabled = false
-        bindCamera(lifecycleOwner, previewView)
+        bindCamera(previewView)
     }
 
     fun toggleTorch(enabled: Boolean) {
@@ -62,8 +103,9 @@ class CameraManager(private val context: Context) {
         camera?.cameraControl?.enableTorch(enabled)
     }
 
-    private fun bindCamera(lifecycleOwner: LifecycleOwner, previewView: PreviewView) {
+    private fun bindCamera(previewView: PreviewView) {
         val provider = cameraProvider ?: return
+        backgroundLifecycleOwner.startAndResume()
 
         try {
             provider.unbindAll()
@@ -74,7 +116,7 @@ class CameraManager(private val context: Context) {
                 CameraSelector.DEFAULT_BACK_CAMERA
             }
 
-            val preview = Preview.Builder().build().also {
+            preview = Preview.Builder().build().also {
                 it.surfaceProvider = previewView.surfaceProvider
             }
 
@@ -89,12 +131,13 @@ class CameraManager(private val context: Context) {
             videoCapture = VideoCapture.withOutput(recorder)
 
             camera = provider.bindToLifecycle(
-                lifecycleOwner,
+                backgroundLifecycleOwner,
                 cameraSelector,
                 preview,
                 imageCapture,
                 videoCapture
             )
+            isCameraBound = true
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -140,6 +183,7 @@ class CameraManager(private val context: Context) {
             return
         }
 
+        backgroundLifecycleOwner.startAndResume()
         val outputOptions = FileOutputOptions.Builder(outputFile).build()
 
         val pendingRecording = capture.output.prepareRecording(context, outputOptions)
@@ -175,4 +219,15 @@ class CameraManager(private val context: Context) {
     }
 
     fun isRecordingVideo(): Boolean = currentRecording != null
+
+    fun release() {
+        stopVideoRecording()
+        try {
+            cameraProvider?.unbindAll()
+        } catch (e: Exception) {
+            // Ignore
+        }
+        backgroundLifecycleOwner.destroy()
+        isCameraBound = false
+    }
 }

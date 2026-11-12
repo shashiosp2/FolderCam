@@ -18,22 +18,26 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CreateNewFolder
+import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.LightMode
+import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.SdStorage
 import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.Button
-import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -45,10 +49,12 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -67,6 +73,10 @@ fun FolderSettingsDialog(
     folders: List<MediaFolder>,
     selectedFolderId: String?,
     folderCounts: Map<String, Int>,
+    isDarkTheme: Boolean,
+    onToggleDarkTheme: (Boolean) -> Unit,
+    onRestoreFromSdcardFile: () -> Unit,
+    onRestoreFromJsonContent: (String) -> Unit,
     onSelectFolder: (MediaFolder) -> Unit,
     onAddFolder: (name: String, sdcardPath: String, treeUri: String?) -> Unit,
     onUpdateFolder: (folderId: String, name: String, sdcardPath: String, treeUri: String?) -> Unit,
@@ -100,7 +110,7 @@ fun FolderSettingsDialog(
                     Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
                 )
             } catch (e: Exception) {
-                // Ignore if persistable permission not supported by provider
+                // Ignore if persistable permission not supported
             }
             selectedTreeUri = uri.toString()
             val resolvedPath = onResolveTreeUri(uri)
@@ -110,6 +120,23 @@ fun FolderSettingsDialog(
                 folderName = suggestedName
             }
             validationError = null
+        }
+    }
+
+    val openConfigFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            try {
+                val jsonText = context.contentResolver.openInputStream(uri)
+                    ?.bufferedReader()
+                    ?.use { it.readText() }
+                if (!jsonText.isNullOrBlank()) {
+                    onRestoreFromJsonContent(jsonText)
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
     }
 
@@ -134,7 +161,7 @@ fun FolderSettingsDialog(
                 text = if (requiresAtLeastOneFolder) {
                     "Specify At Least 1 Folder"
                 } else {
-                    "Folder Settings (/sdcard)"
+                    "Settings & Folders"
                 },
                 style = MaterialTheme.typography.headlineSmall,
                 fontWeight = FontWeight.Bold
@@ -142,9 +169,113 @@ fun FolderSettingsDialog(
         },
         text = {
             Column(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
+                // Theme Toggle Row (Material 3)
+                OutlinedCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = MaterialTheme.shapes.medium
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = if (isDarkTheme) Icons.Default.DarkMode else Icons.Default.LightMode,
+                                contentDescription = null,
+                                tint = colorScheme.primary
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
+                                Text(
+                                    text = if (isDarkTheme) "Dark Mode" else "Light Mode",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = "Material 3 Theme",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+
+                        Switch(
+                            checked = isDarkTheme,
+                            onCheckedChange = { onToggleDarkTheme(it) },
+                            modifier = Modifier.testTag("settings_theme_switch")
+                        )
+                    }
+                }
+
+                // /sdcard/.foldercam JSON Config Sync & Restore Card
+                OutlinedCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = MaterialTheme.shapes.medium
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.SdStorage,
+                                contentDescription = null,
+                                tint = colorScheme.primary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "JSON Config: /sdcard/.foldercam",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        Text(
+                            text = "All settings and folders are automatically saved in JSON format at /sdcard/.foldercam and can be restored anytime.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colorScheme.onSurfaceVariant
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            FilledTonalButton(
+                                onClick = onRestoreFromSdcardFile,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("restore_sdcard_foldercam_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Restore,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Restore .foldercam", maxLines = 1)
+                            }
+
+                            OutlinedButton(
+                                onClick = { openConfigFileLauncher.launch(arrayOf("*/*")) },
+                                modifier = Modifier.testTag("pick_foldercam_file_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.FileOpen,
+                                    contentDescription = "Pick .foldercam file",
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+
                 // Banner if zero folders exist
                 if (requiresAtLeastOneFolder) {
                     Surface(
@@ -166,30 +297,7 @@ fun FolderSettingsDialog(
                             )
                             Spacer(modifier = Modifier.width(10.dp))
                             Text(
-                                text = "No folders are configured by default. Please specify at least 1 folder (Name and /sdcard Location) to store your recorded audio, photos, and videos.",
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                        }
-                    }
-                } else {
-                    Surface(
-                        color = colorScheme.secondaryContainer,
-                        contentColor = colorScheme.onSecondaryContainer,
-                        shape = MaterialTheme.shapes.medium,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.SdStorage,
-                                contentDescription = null,
-                                modifier = Modifier.size(20.dp)
-                            )
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Text(
-                                text = "When a folder is selected in the bottom bar, all recorded audio, photos, and videos are automatically saved to its /sdcard location.",
+                                text = "No folders are configured by default. Please specify at least 1 folder (Name and /sdcard Location) or restore from /sdcard/.foldercam.",
                                 style = MaterialTheme.typography.bodySmall
                             )
                         }
@@ -219,7 +327,6 @@ fun FolderSettingsDialog(
                                 onValueChange = {
                                     folderName = it
                                     validationError = null
-                                    // Auto-suggest /sdcard/<name> if user hasn't picked a specific folder yet
                                     if (sdcardLocation == "/sdcard/" || sdcardLocation == "/sdcard") {
                                         val safe = it.trim().replace("[^a-zA-Z0-9_-]".toRegex(), "_")
                                         if (safe.isNotEmpty()) {
@@ -255,7 +362,6 @@ fun FolderSettingsDialog(
                                     .testTag("new_folder_location_input")
                             )
 
-                            // Buttons to select folder on /sdcard
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -318,42 +424,23 @@ fun FolderSettingsDialog(
                                     onClick = {
                                         val cleanName = folderName.trim()
                                         val cleanPath = sdcardLocation.trim()
-                                        when {
-                                            cleanName.isEmpty() -> {
-                                                validationError = "Please enter a folder name."
-                                            }
-                                            cleanPath.isEmpty() || cleanPath == "/sdcard" || cleanPath == "/sdcard/" -> {
-                                                val normalized = FolderRepository.normalizeSdcardPath(cleanPath, cleanName)
-                                                saveOrUpdate(
-                                                    editingFolderId = editingFolderId,
-                                                    name = cleanName,
-                                                    path = normalized,
-                                                    treeUri = selectedTreeUri,
-                                                    onAddFolder = onAddFolder,
-                                                    onUpdateFolder = onUpdateFolder
-                                                )
-                                                folderName = ""
-                                                sdcardLocation = "/sdcard/"
-                                                selectedTreeUri = null
-                                                editingFolderId = null
-                                                isEditingOrAdding = false
-                                            }
-                                            else -> {
-                                                val normalized = FolderRepository.normalizeSdcardPath(cleanPath, cleanName)
-                                                saveOrUpdate(
-                                                    editingFolderId = editingFolderId,
-                                                    name = cleanName,
-                                                    path = normalized,
-                                                    treeUri = selectedTreeUri,
-                                                    onAddFolder = onAddFolder,
-                                                    onUpdateFolder = onUpdateFolder
-                                                )
-                                                folderName = ""
-                                                sdcardLocation = "/sdcard/"
-                                                selectedTreeUri = null
-                                                editingFolderId = null
-                                                isEditingOrAdding = false
-                                            }
+                                        if (cleanName.isEmpty()) {
+                                            validationError = "Please enter a folder name."
+                                        } else {
+                                            val normalized = FolderRepository.normalizeSdcardPath(cleanPath, cleanName)
+                                            saveOrUpdate(
+                                                editingFolderId = editingFolderId,
+                                                name = cleanName,
+                                                path = normalized,
+                                                treeUri = selectedTreeUri,
+                                                onAddFolder = onAddFolder,
+                                                onUpdateFolder = onUpdateFolder
+                                            )
+                                            folderName = ""
+                                            sdcardLocation = "/sdcard/"
+                                            selectedTreeUri = null
+                                            editingFolderId = null
+                                            isEditingOrAdding = false
                                         }
                                     },
                                     modifier = Modifier.testTag("save_new_folder_button")
@@ -401,13 +488,11 @@ fun FolderSettingsDialog(
                         color = colorScheme.onSurfaceVariant
                     )
 
-                    LazyColumn(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(220.dp),
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        items(folders, key = { it.id }) { folder ->
+                        folders.forEach { folder ->
                             val isSelected = folder.id == selectedFolderId
                             val count = folderCounts[folder.id] ?: 0
 
@@ -566,7 +651,7 @@ fun SdcardFolderPickerDialog(
         val clean = FolderRepository.normalizeSdcardPath(initialSdcardPath, "")
         mutableStateOf(if (clean.startsWith("/sdcard")) clean else "/sdcard")
     }
-    var refreshTrigger by remember { mutableStateOf(0) }
+    var refreshTrigger by remember { mutableIntStateOf(0) }
     val directories = remember(currentPath, refreshTrigger) {
         onListDirectories(currentPath)
     }
@@ -594,7 +679,6 @@ fun SdcardFolderPickerDialog(
                 modifier = Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                // Current /sdcard path header with Up navigation
                 Surface(
                     color = colorScheme.secondaryContainer,
                     contentColor = colorScheme.onSecondaryContainer,
@@ -688,7 +772,7 @@ fun SdcardFolderPickerDialog(
                 }
 
                 Text(
-                    text = "Tap a folder below to browse inside, or tap 'Select This Folder' to use $currentPath",
+                    text = "Tap a folder below to browse inside, or tap 'Select $currentPath'",
                     style = MaterialTheme.typography.bodySmall,
                     color = colorScheme.onSurfaceVariant
                 )

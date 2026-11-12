@@ -240,59 +240,6 @@ fun WaveformVisualizer(
                     }
                 }
             }
-
-            Spacer(modifier = Modifier.height(20.dp))
-
-            // Destination Folder Chip (M3 AssistChip)
-            AssistChip(
-                onClick = onOpenFolderSettings,
-                label = {
-                    if (targetFolder != null) {
-                        Text(
-                            text = "${targetFolder.name} • ${targetFolder.sdcardPath}",
-                            style = MaterialTheme.typography.labelLarge
-                        )
-                    } else {
-                        Text(
-                            text = "No folder specified — Tap to set /sdcard folder",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = colorScheme.error
-                        )
-                    }
-                },
-                leadingIcon = {
-                    Icon(
-                        imageVector = Icons.Default.Folder,
-                        contentDescription = null,
-                        tint = if (targetFolder != null) colorScheme.primary else colorScheme.error,
-                        modifier = Modifier.size(18.dp)
-                    )
-                },
-                colors = AssistChipDefaults.assistChipColors(
-                    containerColor = colorScheme.surfaceVariant.copy(alpha = 0.5f)
-                )
-            )
-
-            if (!isRecording) {
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Outlined.SwipeLeft,
-                        contentDescription = null,
-                        tint = colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "Swipe left for Photo mode, then Video mode",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = colorScheme.onSurfaceVariant
-                    )
-                }
-            }
         }
     }
 }

@@ -5,6 +5,7 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.audio.AudioRecorderManager
+import com.example.camera.CameraManager
 import com.example.data.FolderRepository
 import com.example.data.MediaStorageManager
 import com.example.model.CaptureState
@@ -13,6 +14,8 @@ import com.example.model.MediaItem
 import com.example.model.MediaType
 import com.example.model.RecorderMode
 import com.example.model.RecordingStatus
+import com.example.service.RecordingForegroundService
+import com.example.service.RecordingServiceBridge
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -28,12 +31,15 @@ import java.io.File
 
 class FolderCamViewModel(application: Application) : AndroidViewModel(application) {
 
-    val folderRepository = FolderRepository(application)
-    val mediaStorageManager = MediaStorageManager(application)
-    val audioRecorderManager = AudioRecorderManager(application)
+    private val appContext = application.applicationContext
+    val folderRepository = FolderRepository(appContext)
+    val mediaStorageManager = MediaStorageManager(appContext)
+    val audioRecorderManager = AudioRecorderManager(appContext)
+    val cameraManager = CameraManager(appContext)
 
     val folders: StateFlow<List<MediaFolder>> = folderRepository.folders
     val selectedFolderId: StateFlow<String?> = folderRepository.selectedFolderId
+    val isDarkTheme: StateFlow<Boolean> = folderRepository.isDarkTheme
 
     val selectedFolder: StateFlow<MediaFolder?> = combine(folders, selectedFolderId) { list, id ->
         if (list.isEmpty()) {
@@ -77,6 +83,14 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
     val isGalleryOpen: StateFlow<Boolean> = _isGalleryOpen.asStateFlow()
 
     init {
+        RecordingServiceBridge.onStopRequested = {
+            when (_captureState.value) {
+                CaptureState.RECORDING_AUDIO -> stopAudioRecording()
+                CaptureState.RECORDING_VIDEO -> cameraManager.stopVideoRecording()
+                CaptureState.IDLE -> RecordingForegroundService.stop(appContext)
+            }
+        }
+
         viewModelScope.launch {
             selectedFolder.collect {
                 refreshFolderMedia()
@@ -87,6 +101,42 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
                 refreshAllFolderCounts()
             }
         }
+    }
+
+    fun toggleDarkTheme() {
+        folderRepository.toggleDarkTheme()
+    }
+
+    fun setDarkTheme(isDark: Boolean) {
+        folderRepository.setDarkTheme(isDark)
+    }
+
+    fun restoreSettingsFromSdcard(): Boolean {
+        val restored = folderRepository.restoreFromSdcardConfigFile()
+        if (restored) {
+            showToast("Restored settings from /sdcard/.foldercam")
+            refreshAllFolderCounts()
+            refreshFolderMedia()
+        } else {
+            showToast("Could not find or read /sdcard/.foldercam")
+        }
+        return restored
+    }
+
+    fun restoreSettingsFromJson(jsonString: String): Boolean {
+        val restored = folderRepository.restoreFromJsonString(jsonString)
+        if (restored) {
+            showToast("Settings restored and synced to /sdcard/.foldercam")
+            refreshAllFolderCounts()
+            refreshFolderMedia()
+        } else {
+            showToast("Invalid .foldercam JSON format")
+        }
+        return restored
+    }
+
+    fun exportSettingsJson(): String {
+        return folderRepository.toJsonString()
     }
 
     fun setRecorderMode(mode: RecorderMode) {
@@ -190,9 +240,18 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun onVideoRecordingStarted() {
+        val folder = selectedFolder.value
         _recorderMode.value = RecorderMode.VIDEO
         _captureState.value = CaptureState.RECORDING_VIDEO
         _videoDurationSeconds.value = 0
+
+        RecordingForegroundService.start(
+            context = appContext,
+            recordingType = RecordingForegroundService.TYPE_VIDEO,
+            folderName = folder?.name ?: "Folder",
+            sdcardPath = folder?.sdcardPath ?: "/sdcard"
+        )
+
         videoTimerJob?.cancel()
         videoTimerJob = viewModelScope.launch(Dispatchers.Default) {
             val startTime = System.currentTimeMillis()
@@ -207,6 +266,8 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
         videoTimerJob?.cancel()
         videoTimerJob = null
         _captureState.value = CaptureState.IDLE
+        RecordingForegroundService.stop(appContext)
+
         val folder = selectedFolder.value ?: return
         viewModelScope.launch {
             mediaStorageManager.finalizeCapturedFile(folder, file, MediaType.VIDEO)
@@ -220,16 +281,24 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
         videoTimerJob?.cancel()
         videoTimerJob = null
         _captureState.value = CaptureState.IDLE
+        RecordingForegroundService.stop(appContext)
         showToast("Video error: $message")
     }
 
     fun startAudioRecording(): Boolean {
         if (_captureState.value != CaptureState.IDLE) return false
         _recorderMode.value = RecorderMode.AUDIO
+        val folder = selectedFolder.value
         val outputFile = prepareOutputFile(MediaType.AUDIO) ?: return false
         val started = audioRecorderManager.startRecording(outputFile, viewModelScope)
         if (started) {
             _captureState.value = CaptureState.RECORDING_AUDIO
+            RecordingForegroundService.start(
+                context = appContext,
+                recordingType = RecordingForegroundService.TYPE_AUDIO,
+                folderName = folder?.name ?: "Folder",
+                sdcardPath = folder?.sdcardPath ?: "/sdcard"
+            )
         } else {
             showToast("Failed to start audio recording")
         }
@@ -239,6 +308,8 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
     fun stopAudioRecording() {
         val file = audioRecorderManager.stopRecording()
         _captureState.value = CaptureState.IDLE
+        RecordingForegroundService.stop(appContext)
+
         val folder = selectedFolder.value
         if (file != null && file.exists() && folder != null) {
             viewModelScope.launch {
@@ -294,5 +365,7 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
         super.onCleared()
         videoTimerJob?.cancel()
         audioRecorderManager.cancelRecording()
+        cameraManager.release()
+        RecordingForegroundService.stop(appContext)
     }
 }
