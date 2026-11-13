@@ -31,3 +31,14 @@ data class RecordingStatus(
     val currentDecibels: Float = 0f,
     val currentOutputFilePath: String? = null
 )
+
+data class PhotoCaptureFeedbackState(
+    val triggerCounter: Int = 0,
+    val savedCounter: Int = 0,
+    val inFlightCounter: Int = 0,
+    val isBurstActive: Boolean = false,
+    val lastFlashTriggerId: Long = 0L,
+    val targetFolderPath: String = "",
+    val summaryMessage: String? = null,
+    val isVisible: Boolean = false
+)

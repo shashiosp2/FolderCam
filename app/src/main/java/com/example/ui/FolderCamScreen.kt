@@ -10,11 +10,15 @@ import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.view.PreviewView
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -32,7 +36,9 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.BurstMode
 import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.FlashOff
 import androidx.compose.material.icons.filled.FlashOn
@@ -68,9 +74,13 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -110,6 +120,7 @@ fun FolderCamScreen(
     val isGalleryOpen by viewModel.isGalleryOpen.collectAsState()
     val hasAllFilesAccess by viewModel.hasAllFilesAccess.collectAsState()
     val needsAllFilesAccessBanner by viewModel.needsAllFilesAccessBanner.collectAsState()
+    val photoFeedback by viewModel.photoFeedback.collectAsState()
 
     var hasCameraPermission by remember {
         mutableStateOf(
@@ -202,6 +213,7 @@ fun FolderCamScreen(
                 }
                 Lifecycle.Event.ON_STOP -> {
                     isHostForeground = false
+                    viewModel.stopPhotoBurst()
                     cameraManager.onHostStop()
                 }
                 else -> {}
@@ -219,6 +231,23 @@ fun FolderCamScreen(
             cameraManager.unbindCameraIfIdle()
         } else if (hasCameraPermission && isHostForeground && previewViewRef != null) {
             cameraManager.bindOrAttachPreview(previewViewRef!!, recorderMode)
+        }
+    }
+
+    val flashAlpha = remember { Animatable(0f) }
+    val hapticFeedback = LocalHapticFeedback.current
+
+    LaunchedEffect(photoFeedback.lastFlashTriggerId) {
+        if (photoFeedback.lastFlashTriggerId > 0L) {
+            hapticFeedback.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+            flashAlpha.snapTo(0.42f)
+            flashAlpha.animateTo(0f, animationSpec = tween(durationMillis = 120))
+        }
+    }
+
+    LaunchedEffect(photoFeedback.isBurstActive) {
+        if (photoFeedback.isBurstActive) {
+            hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
         }
     }
 
@@ -342,6 +371,7 @@ fun FolderCamScreen(
                 captureState = captureState,
                 videoDurationSeconds = videoDuration,
                 cameraUiState = cameraUiState,
+                photoFeedback = photoFeedback,
                 onLensSelected = { lens ->
                     cameraManager.selectLens(lens)
                 },
@@ -355,16 +385,13 @@ fun FolderCamScreen(
                     viewModel.openSettings()
                 },
                 onTakePhotoClick = {
-                    val file = viewModel.prepareOutputFile(MediaType.PHOTO) ?: return@DualBottomBars
-                    cameraManager.takePhoto(
-                        outputFile = file,
-                        onSuccess = { savedFile ->
-                            viewModel.onPhotoCaptured(savedFile)
-                        },
-                        onError = { err ->
-                            viewModel.showToast(err)
-                        }
-                    )
+                    viewModel.captureSinglePhoto(fromBurstLoop = false)
+                },
+                onStartPhotoBurst = {
+                    viewModel.startPhotoBurst()
+                },
+                onStopPhotoBurst = {
+                    viewModel.stopPhotoBurst()
                 },
                 onRecordVideoClick = {
                     if (captureState == CaptureState.RECORDING_VIDEO) {
@@ -545,9 +572,103 @@ fun FolderCamScreen(
                 }
             }
 
-            // Material 3 Toast / Snackbar Banner
+            // Visual Shutter Flash Pulse on every single or burst shot
+            if (flashAlpha.value > 0.005f) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.White.copy(alpha = flashAlpha.value))
+                )
+            }
+
+            // Live Photo / Burst Capture Counter Pill (updates immediately on every shot & tracks saving queue)
             AnimatedVisibility(
-                visible = toastMessage != null,
+                visible = photoFeedback.isVisible && photoFeedback.triggerCounter > 0,
+                enter = fadeIn() + slideInVertically(initialOffsetY = { -it }),
+                exit = fadeOut() + slideOutVertically(targetOffsetY = { -it }),
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 12.dp, start = 16.dp, end = 16.dp)
+            ) {
+                val isSummary = photoFeedback.summaryMessage != null &&
+                    !photoFeedback.isBurstActive &&
+                    photoFeedback.inFlightCounter == 0
+                val containerColor = when {
+                    isSummary -> colorScheme.inverseSurface
+                    photoFeedback.isBurstActive -> colorScheme.tertiaryContainer
+                    else -> colorScheme.primaryContainer
+                }
+                val contentColor = when {
+                    isSummary -> colorScheme.inverseOnSurface
+                    photoFeedback.isBurstActive -> colorScheme.onTertiaryContainer
+                    else -> colorScheme.onPrimaryContainer
+                }
+
+                Surface(
+                    color = containerColor,
+                    contentColor = contentColor,
+                    shape = MaterialTheme.shapes.extraLarge,
+                    tonalElevation = 6.dp,
+                    shadowElevation = 6.dp,
+                    modifier = Modifier.testTag("live_photo_burst_pill")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = when {
+                                isSummary -> Icons.Default.CheckCircle
+                                photoFeedback.isBurstActive -> Icons.Default.BurstMode
+                                else -> Icons.Default.CameraAlt
+                            },
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        if (isSummary) {
+                            Text(
+                                text = photoFeedback.summaryMessage.orEmpty(),
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium
+                            )
+                        } else {
+                            val prefix = if (photoFeedback.isBurstActive) "BURST" else "CAPTURED"
+                            Text(
+                                text = prefix,
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold
+                            )
+                            AnimatedContent(
+                                targetState = photoFeedback.triggerCounter,
+                                transitionSpec = {
+                                    (fadeIn(tween(90)) + slideInVertically { -it / 2 })
+                                        .togetherWith(fadeOut(tween(90)) + slideOutVertically { it / 2 })
+                                },
+                                label = "burst_shot_count"
+                            ) { count ->
+                                Text(
+                                    text = "#$count",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
+                            }
+                            if (photoFeedback.inFlightCounter > 0) {
+                                Text(
+                                    text = "· Saving ${photoFeedback.inFlightCounter}",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = contentColor.copy(alpha = 0.85f)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Material 3 Toast / Snackbar Banner (Audio / Video / Errors)
+            AnimatedVisibility(
+                visible = toastMessage != null && !photoFeedback.isVisible,
                 enter = fadeIn() + slideInVertically(initialOffsetY = { -it }),
                 exit = fadeOut() + slideOutVertically(targetOffsetY = { -it }),
                 modifier = Modifier

@@ -19,6 +19,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicInteger
 
 data class MediaSaveResult(
     val savedToPublicSdcard: Boolean,
@@ -43,7 +44,22 @@ class MediaStorageManager(private val context: Context) {
         dir
     }
 
-    private val dateFormat = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
+    private val dateFormat = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US)
+    private val fileSequence = AtomicInteger(0)
+
+    private fun buildUniqueFileName(type: MediaType): String {
+        val timestamp = synchronized(dateFormat) {
+            dateFormat.format(Date())
+        }
+        val seq = fileSequence.incrementAndGet() % 1000
+        val seqStr = String.format(Locale.US, "%03d", seq)
+        val (prefix, ext) = when (type) {
+            MediaType.PHOTO -> "IMG_" to ".jpg"
+            MediaType.VIDEO -> "VID_" to ".mp4"
+            MediaType.AUDIO -> "AUD_" to ".m4a"
+        }
+        return "$prefix${timestamp}_$seqStr$ext"
+    }
 
     private val defaultSdcardRoots = listOf(
         "DCIM",
@@ -197,14 +213,13 @@ class MediaStorageManager(private val context: Context) {
         return File(mirrorDir, desiredFileName)
     }
 
+    fun prepareFastPhotoFile(folder: MediaFolder): File {
+        val mirrorDir = getMirrorDirectory(folder)
+        return File(mirrorDir, buildUniqueFileName(MediaType.PHOTO))
+    }
+
     fun prepareOutputFile(folder: MediaFolder, type: MediaType): File {
-        val timestamp = dateFormat.format(Date())
-        val (prefix, ext) = when (type) {
-            MediaType.PHOTO -> "IMG_" to ".jpg"
-            MediaType.VIDEO -> "VID_" to ".mp4"
-            MediaType.AUDIO -> "AUD_" to ".m4a"
-        }
-        val fileName = "$prefix$timestamp$ext"
+        val fileName = buildUniqueFileName(type)
 
         try {
             val realSdcardDir = toRealFile(folder.sdcardPath)

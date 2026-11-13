@@ -167,4 +167,60 @@ class ExampleRobolectricTest {
         cameraManager.onHostStop()
         cameraManager.unbindCameraIfIdle()
     }
+
+    @Test
+    fun `fast burst photo staging generates unique collision-free filenames`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val storage = MediaStorageManager(context)
+        val folder = MediaFolder(
+            id = "burst_test",
+            name = "BurstFolder",
+            sdcardPath = "/sdcard/DCIM/BurstTest"
+        )
+
+        val generatedNames = (1..25).map {
+            storage.prepareFastPhotoFile(folder).name
+        }.toSet()
+
+        assertEquals(25, generatedNames.size)
+        assertTrue(generatedNames.all { it.startsWith("IMG_") && it.endsWith(".jpg") })
+    }
+
+    @Test
+    fun `photo feedback tracks multi-shot async captures and settles cleanly`() {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        val viewModel = FolderCamViewModel(app)
+        val folder = viewModel.addFolder("BurstCam", "/sdcard/DCIM/BurstCam")
+
+        val staged1 = viewModel.mediaStorageManager.prepareFastPhotoFile(folder)
+        val staged2 = viewModel.mediaStorageManager.prepareFastPhotoFile(folder)
+        staged1.parentFile?.mkdirs()
+        staged1.writeBytes(byteArrayOf(10, 20, 30))
+        staged2.writeBytes(byteArrayOf(40, 50, 60))
+
+        viewModel.onPhotoCaptured(staged1)
+        viewModel.onPhotoCaptured(staged2)
+
+        // Wait up to 3s for IO coroutine to finalize both async captures
+        val deadlineMs = System.currentTimeMillis() + 3000L
+        while (System.currentTimeMillis() < deadlineMs) {
+            val current = viewModel.photoFeedback.value
+            if (current.savedCounter == 2 && current.inFlightCounter == 0 && current.summaryMessage != null) {
+                break
+            }
+            Thread.sleep(25)
+        }
+
+        val feedback = viewModel.photoFeedback.value
+        assertEquals(2, feedback.savedCounter)
+        assertEquals(0, feedback.inFlightCounter)
+        assertTrue(feedback.isVisible)
+        assertEquals("Saved 2 photos to /sdcard/DCIM/BurstCam", feedback.summaryMessage)
+
+        // Clean up created test files
+        File("/sdcard/DCIM/BurstCam/${staged1.name}").delete()
+        File("/sdcard/DCIM/BurstCam/${staged2.name}").delete()
+        staged1.delete()
+        staged2.delete()
+    }
 }

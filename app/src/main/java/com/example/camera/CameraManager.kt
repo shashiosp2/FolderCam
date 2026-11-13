@@ -33,8 +33,12 @@ import com.example.model.RecorderMode
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import androidx.camera.core.ExperimentalZeroShutterLag
 import java.io.File
 import java.util.Locale
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.abs
 
 data class LensOption(
@@ -48,6 +52,7 @@ data class LensOption(
 data class CameraUiState(
     val isFrontCamera: Boolean = false,
     val isTorchEnabled: Boolean = false,
+    val isZslActive: Boolean = false,
     val currentZoomRatio: Float = 1.0f,
     val minZoomRatio: Float = 1.0f,
     val maxZoomRatio: Float = 1.0f,
@@ -108,9 +113,12 @@ class CameraManager(private val context: Context) {
         val DEFAULT_PHOTO_12MP_SIZE = Size(4000, 3000)
         // Default 30 FPS range for 4K video recording
         val DEFAULT_VIDEO_30FPS_RANGE = Range(30, 30)
+        const val MAX_IN_FLIGHT_BURST = 6
     }
 
     val backgroundLifecycleOwner = BackgroundCameraLifecycleOwner()
+    private val captureExecutor: ExecutorService = Executors.newFixedThreadPool(2)
+    private val inFlightImageCaptures = AtomicInteger(0)
     private var cameraProvider: ProcessCameraProvider? = null
     private var camera: Camera? = null
     private var preview: Preview? = null
@@ -344,6 +352,7 @@ class CameraManager(private val context: Context) {
         boundHasVideoCapture = false
     }
 
+    @SuppressLint("UnsafeOptInUsageError")
     private fun bindCamera(
         previewView: PreviewView,
         mode: RecorderMode,
@@ -377,40 +386,25 @@ class CameraManager(private val context: Context) {
             )
             .build()
 
-        val image12MpUseCase = ImageCapture.Builder()
-            .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
-            .setResolutionSelector(photo12MpResolutionSelector)
-            .build()
-
-        val video4kQualitySelector = QualitySelector.fromOrderedList(
-            listOf(Quality.UHD, Quality.FHD, Quality.HD, Quality.SD),
-            FallbackStrategy.higherQualityOrLowerThan(Quality.UHD)
-        )
-
-        val recorder4k = Recorder.Builder()
-            .setQualitySelector(video4kQualitySelector)
-            .build()
-
-        val video4k30UseCase = VideoCapture.Builder(recorder4k)
-            .setTargetFrameRate(DEFAULT_VIDEO_30FPS_RANGE)
-            .build()
-
         var boundCamera: Camera? = null
         var activeImageCapture: ImageCapture? = null
         var activeVideoCapture: VideoCapture<Recorder>? = null
         var effectiveVideoLabel = "4K 30fps"
+        var usedZslBuilder = false
 
-        // Attempt 1: Full combined bind (Preview + 12MP ImageCapture + 4K 30fps VideoCapture)
-        boundCamera = tryBindUseCases(
-            provider = provider,
-            selector = cameraSelector,
-            useCases = arrayOf(previewUseCase, image12MpUseCase, video4k30UseCase)
-        )
-        if (boundCamera != null) {
-            activeImageCapture = image12MpUseCase
-            activeVideoCapture = video4k30UseCase
-        } else if (mode == RecorderMode.VIDEO) {
-            // Attempt 2A (Video mode): Bind Preview + 4K 30fps VideoCapture alone
+        if (mode == RecorderMode.VIDEO) {
+            // Video Mode: Bind Preview + 4K 30fps VideoCapture with graceful quality fallbacks
+            val video4kQualitySelector = QualitySelector.fromOrderedList(
+                listOf(Quality.UHD, Quality.FHD, Quality.HD, Quality.SD),
+                FallbackStrategy.higherQualityOrLowerThan(Quality.UHD)
+            )
+            val recorder4k = Recorder.Builder()
+                .setQualitySelector(video4kQualitySelector)
+                .build()
+            val video4k30UseCase = VideoCapture.Builder(recorder4k)
+                .setTargetFrameRate(DEFAULT_VIDEO_30FPS_RANGE)
+                .build()
+
             boundCamera = tryBindUseCases(
                 provider = provider,
                 selector = cameraSelector,
@@ -419,7 +413,6 @@ class CameraManager(private val context: Context) {
             if (boundCamera != null) {
                 activeVideoCapture = video4k30UseCase
             } else {
-                // Attempt 2B: Adaptive VideoCapture without strict [30,30] FPS lock
                 val fallbackRecorder = Recorder.Builder()
                     .setQualitySelector(
                         QualitySelector.fromOrderedList(
@@ -440,26 +433,49 @@ class CameraManager(private val context: Context) {
                 }
             }
         } else {
-            // Attempt 3A (Photo mode): Bind Preview + 12MP ImageCapture alone
+            // Photo Mode: Dedicated Photo binding without simultaneous VideoCapture unlocks Zero Shutter Lag!
+            val zslImage12MpUseCase = ImageCapture.Builder()
+                .setCaptureMode(ImageCapture.CAPTURE_MODE_ZERO_SHUTTER_LAG)
+                .setFlashMode(ImageCapture.FLASH_MODE_OFF)
+                .setResolutionSelector(photo12MpResolutionSelector)
+                .build()
+
             boundCamera = tryBindUseCases(
                 provider = provider,
                 selector = cameraSelector,
-                useCases = arrayOf(previewUseCase, image12MpUseCase)
+                useCases = arrayOf(previewUseCase, zslImage12MpUseCase)
             )
             if (boundCamera != null) {
-                activeImageCapture = image12MpUseCase
+                activeImageCapture = zslImage12MpUseCase
+                usedZslBuilder = true
             } else {
-                // Attempt 3B: Default ImageCapture fallback
-                val autoImageUseCase = ImageCapture.Builder()
+                // Fallback 1: Minimize latency with 12MP resolution
+                val minLatency12Mp = ImageCapture.Builder()
                     .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                    .setFlashMode(ImageCapture.FLASH_MODE_OFF)
+                    .setResolutionSelector(photo12MpResolutionSelector)
                     .build()
                 boundCamera = tryBindUseCases(
                     provider = provider,
                     selector = cameraSelector,
-                    useCases = arrayOf(previewUseCase, autoImageUseCase)
+                    useCases = arrayOf(previewUseCase, minLatency12Mp)
                 )
                 if (boundCamera != null) {
-                    activeImageCapture = autoImageUseCase
+                    activeImageCapture = minLatency12Mp
+                } else {
+                    // Fallback 2: Minimize latency with device default resolution
+                    val autoImageUseCase = ImageCapture.Builder()
+                        .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                        .setFlashMode(ImageCapture.FLASH_MODE_OFF)
+                        .build()
+                    boundCamera = tryBindUseCases(
+                        provider = provider,
+                        selector = cameraSelector,
+                        useCases = arrayOf(previewUseCase, autoImageUseCase)
+                    )
+                    if (boundCamera != null) {
+                        activeImageCapture = autoImageUseCase
+                    }
                 }
             }
         }
@@ -492,6 +508,12 @@ class CameraManager(private val context: Context) {
             }
         }
 
+        val hardwareZslSupported = try {
+            boundCamera.cameraInfo.isZslSupported
+        } catch (e: Exception) {
+            false
+        }
+
         // Inspect zoom range & available lenses (Ultrawide -> Wide -> Zoom/Telephoto)
         val zoomState = boundCamera.cameraInfo.zoomState.value
         val minZoom = zoomState?.minZoomRatio ?: 1.0f
@@ -516,6 +538,7 @@ class CameraManager(private val context: Context) {
         _cameraState.value = CameraUiState(
             isFrontCamera = isFrontCamera,
             isTorchEnabled = isTorchEnabled,
+            isZslActive = usedZslBuilder && hardwareZslSupported && !isTorchEnabled,
             currentZoomRatio = targetZoom,
             minZoomRatio = minZoom,
             maxZoomRatio = maxZoom,
@@ -631,6 +654,10 @@ class CameraManager(private val context: Context) {
         }
     }
 
+    fun canEnqueueBurstShot(): Boolean {
+        return isCameraBound && imageCapture != null && inFlightImageCaptures.get() < MAX_IN_FLIGHT_BURST
+    }
+
     fun takePhoto(
         outputFile: File,
         onSuccess: (File) -> Unit,
@@ -642,23 +669,32 @@ class CameraManager(private val context: Context) {
             return
         }
 
+        if (inFlightImageCaptures.get() >= MAX_IN_FLIGHT_BURST) {
+            onError("Burst buffer full, saving photos...")
+            return
+        }
+
+        inFlightImageCaptures.incrementAndGet()
         try {
             outputFile.parentFile?.mkdirs()
             val outputOptions = ImageCapture.OutputFileOptions.Builder(outputFile).build()
             capture.takePicture(
                 outputOptions,
-                ContextCompat.getMainExecutor(context),
+                captureExecutor,
                 object : ImageCapture.OnImageSavedCallback {
                     override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
+                        inFlightImageCaptures.updateAndGet { count -> (count - 1).coerceAtLeast(0) }
                         onSuccess(outputFile)
                     }
 
                     override fun onError(exception: ImageCaptureException) {
+                        inFlightImageCaptures.updateAndGet { count -> (count - 1).coerceAtLeast(0) }
                         onError(exception.message ?: "Photo capture failed")
                     }
                 }
             )
         } catch (e: Exception) {
+            inFlightImageCaptures.updateAndGet { count -> (count - 1).coerceAtLeast(0) }
             onError(e.message ?: "Photo capture failed")
         }
     }
@@ -740,5 +776,10 @@ class CameraManager(private val context: Context) {
         stopVideoRecording()
         unbindCameraInternal()
         backgroundLifecycleOwner.destroy()
+        try {
+            captureExecutor.shutdownNow()
+        } catch (e: Exception) {
+            // Ignore
+        }
     }
 }

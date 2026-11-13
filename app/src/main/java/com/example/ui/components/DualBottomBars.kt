@@ -1,16 +1,22 @@
 package com.example.ui.components
 
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -26,6 +32,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.BurstMode
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.FiberManualRecord
@@ -50,9 +57,11 @@ import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -60,6 +69,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -67,7 +80,11 @@ import com.example.camera.CameraUiState
 import com.example.camera.LensOption
 import com.example.model.CaptureState
 import com.example.model.MediaFolder
+import com.example.model.PhotoCaptureFeedbackState
 import com.example.model.RecorderMode
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.util.Locale
 
 @Composable
@@ -79,11 +96,14 @@ fun DualBottomBars(
     captureState: CaptureState,
     videoDurationSeconds: Int,
     cameraUiState: CameraUiState,
+    photoFeedback: PhotoCaptureFeedbackState = PhotoCaptureFeedbackState(),
     onLensSelected: (LensOption) -> Unit,
     onModeSelected: (RecorderMode) -> Unit,
     onFolderSelected: (MediaFolder) -> Unit,
     onAddFolderClick: () -> Unit,
     onTakePhotoClick: () -> Unit,
+    onStartPhotoBurst: () -> Unit = {},
+    onStopPhotoBurst: () -> Unit = {},
     onRecordVideoClick: () -> Unit,
     onRecordAudioClick: () -> Unit,
     modifier: Modifier = Modifier
@@ -275,26 +295,20 @@ fun DualBottomBars(
                     }
                 )
 
-                // 2. PHOTO CAPTURE BUTTON (Second — scroll left from Audio)
+                // 2. PHOTO CAPTURE BUTTON (Second — rapid taps + press-and-hold continuous burst)
                 val isPhotoMode = currentMode == RecorderMode.PHOTO
                 val isPhotoEnabled = captureState == CaptureState.IDLE
 
-                ModeCaptureButton(
-                    label = "Photo",
+                PhotoShutterButton(
                     isSelectedMode = isPhotoMode,
-                    isActivelyRecording = false,
+                    isBurstActive = photoFeedback.isBurstActive,
+                    burstShotCount = photoFeedback.triggerCounter,
                     enabled = isPhotoEnabled,
-                    activeIcon = Icons.Default.CameraAlt,
-                    inactiveIcon = Icons.Outlined.CameraAlt,
-                    pulseScale = 1f,
-                    testTag = "photo_capture_button",
-                    onClick = {
-                        if (!isPhotoMode) {
-                            onModeSelected(RecorderMode.PHOTO)
-                        } else {
-                            onTakePhotoClick()
-                        }
-                    }
+                    pulseScale = pulseScale,
+                    onSelectMode = { onModeSelected(RecorderMode.PHOTO) },
+                    onTapPhoto = onTakePhotoClick,
+                    onStartBurst = onStartPhotoBurst,
+                    onStopBurst = onStopPhotoBurst
                 )
 
                 // 3. VIDEO RECORDING BUTTON (Third — scroll left from Photo)
@@ -540,6 +554,183 @@ private fun ModeCaptureButton(
                 fontWeight = if (isSelectedMode) FontWeight.Bold else FontWeight.Medium,
                 color = when {
                     isActivelyRecording -> colorScheme.error
+                    isSelectedMode -> colorScheme.onPrimaryContainer
+                    else -> colorScheme.onSurfaceVariant
+                },
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun PhotoShutterButton(
+    isSelectedMode: Boolean,
+    isBurstActive: Boolean,
+    burstShotCount: Int,
+    enabled: Boolean,
+    pulseScale: Float,
+    onSelectMode: () -> Unit,
+    onTapPhoto: () -> Unit,
+    onStartBurst: () -> Unit,
+    onStopBurst: () -> Unit
+) {
+    val colorScheme = MaterialTheme.colorScheme
+    var isPressed by remember { mutableStateOf(false) }
+
+    val buttonSize by animateDpAsState(
+        targetValue = if (isSelectedMode) 56.dp else 48.dp,
+        label = "photo_button_size"
+    )
+
+    val recoilScale by animateFloatAsState(
+        targetValue = when {
+            isBurstActive -> 0.90f * pulseScale
+            isPressed -> 0.88f
+            else -> 1.0f
+        },
+        animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
+        label = "photo_shutter_recoil"
+    )
+
+    val containerColor by animateColorAsState(
+        targetValue = when {
+            isBurstActive -> colorScheme.tertiary
+            isSelectedMode -> colorScheme.primary
+            else -> colorScheme.secondaryContainer
+        },
+        label = "photo_container_color"
+    )
+
+    val contentColor by animateColorAsState(
+        targetValue = when {
+            isBurstActive -> colorScheme.onTertiary
+            isSelectedMode -> colorScheme.onPrimary
+            else -> colorScheme.onSecondaryContainer
+        },
+        label = "photo_content_color"
+    )
+
+    val label = when {
+        isBurstActive && burstShotCount > 0 -> "Burst $burstShotCount"
+        isBurstActive -> "Burst"
+        else -> "Photo"
+    }
+
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.padding(horizontal = 8.dp)
+    ) {
+        if (isSelectedMode) {
+            Surface(
+                color = containerColor,
+                contentColor = contentColor,
+                shape = CircleShape,
+                tonalElevation = if (isBurstActive) 6.dp else 2.dp,
+                border = if (isBurstActive) {
+                    BorderStroke(2.dp, colorScheme.onTertiary)
+                } else null,
+                modifier = Modifier
+                    .minimumInteractiveComponentSize()
+                    .size(buttonSize)
+                    .scale(recoilScale)
+                    .semantics {
+                        role = Role.Button
+                        onClick(label = "Take Photo") {
+                            if (enabled) onTapPhoto()
+                            true
+                        }
+                    }
+                    .pointerInput(enabled) {
+                        coroutineScope {
+                            awaitEachGesture {
+                                val down = awaitFirstDown(requireUnconsumed = false)
+                                if (!enabled) return@awaitEachGesture
+                                isPressed = true
+                                var burstStarted = false
+                                var cancelledOrDragged = false
+                                val downPosition = down.position
+                                val touchSlop = viewConfiguration.touchSlop
+
+                                val burstTimerJob = launch {
+                                    delay(240L)
+                                    if (!cancelledOrDragged) {
+                                        burstStarted = true
+                                        onStartBurst()
+                                    }
+                                }
+
+                                while (true) {
+                                    val event = awaitPointerEvent()
+                                    val change = event.changes.firstOrNull { it.id == down.id }
+                                    if (change == null || !change.pressed) {
+                                        break
+                                    }
+                                    val dragDistance = (change.position - downPosition).getDistance()
+                                    if (!burstStarted && dragDistance > touchSlop) {
+                                        cancelledOrDragged = true
+                                        burstTimerJob.cancel()
+                                        break
+                                    }
+                                }
+
+                                burstTimerJob.cancel()
+                                isPressed = false
+                                if (burstStarted) {
+                                    onStopBurst()
+                                } else if (!cancelledOrDragged) {
+                                    onTapPhoto()
+                                }
+                            }
+                        }
+                    }
+                    .testTag("photo_capture_button")
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = if (isBurstActive) Icons.Default.BurstMode else Icons.Default.CameraAlt,
+                        contentDescription = if (isBurstActive) "Burst capturing" else "Take Photo (hold for burst)",
+                        modifier = Modifier.size(26.dp)
+                    )
+                }
+            }
+        } else {
+            FilledTonalIconButton(
+                onClick = onSelectMode,
+                enabled = enabled,
+                shape = CircleShape,
+                colors = IconButtonDefaults.filledTonalIconButtonColors(
+                    containerColor = containerColor,
+                    contentColor = contentColor
+                ),
+                modifier = Modifier
+                    .size(buttonSize)
+                    .testTag("photo_capture_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.CameraAlt,
+                    contentDescription = "Photo",
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(4.dp))
+
+        Surface(
+            color = when {
+                isBurstActive -> colorScheme.tertiaryContainer
+                isSelectedMode -> colorScheme.primaryContainer
+                else -> colorScheme.surface.copy(alpha = 0f)
+            },
+            shape = MaterialTheme.shapes.small
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = if (isSelectedMode) FontWeight.Bold else FontWeight.Medium,
+                color = when {
+                    isBurstActive -> colorScheme.onTertiaryContainer
                     isSelectedMode -> colorScheme.onPrimaryContainer
                     else -> colorScheme.onSurfaceVariant
                 },

@@ -12,6 +12,7 @@ import com.example.model.CaptureState
 import com.example.model.MediaFolder
 import com.example.model.MediaItem
 import com.example.model.MediaType
+import com.example.model.PhotoCaptureFeedbackState
 import com.example.model.RecorderMode
 import com.example.model.RecordingStatus
 import com.example.service.RecordingForegroundService
@@ -25,6 +26,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.File
@@ -49,9 +51,11 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }.stateIn(
         viewModelScope,
-        SharingStarted.WhileSubscribed(5000),
+        SharingStarted.Eagerly,
         folderRepository.getSelectedFolder()
     )
+
+    private fun activeFolder(): MediaFolder? = selectedFolder.value ?: folderRepository.getSelectedFolder()
 
     // Default mode is AUDIO (index 0), then PHOTO (index 1), then VIDEO (index 2)
     private val _recorderMode = MutableStateFlow(RecorderMode.AUDIO)
@@ -87,6 +91,12 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
 
     private val _needsAllFilesAccessBanner = MutableStateFlow(false)
     val needsAllFilesAccessBanner: StateFlow<Boolean> = _needsAllFilesAccessBanner.asStateFlow()
+
+    private val _photoFeedback = MutableStateFlow(PhotoCaptureFeedbackState())
+    val photoFeedback: StateFlow<PhotoCaptureFeedbackState> = _photoFeedback.asStateFlow()
+
+    private var burstJob: Job? = null
+    private var photoFeedbackResetJob: Job? = null
 
     init {
         RecordingServiceBridge.onStopRequested = {
@@ -164,6 +174,7 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun setRecorderMode(mode: RecorderMode) {
         if (_recorderMode.value == mode) return
+        stopPhotoBurst()
         if (_captureState.value == CaptureState.RECORDING_AUDIO && mode != RecorderMode.AUDIO) {
             stopAudioRecording()
         }
@@ -247,7 +258,7 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun prepareOutputFile(type: MediaType): File? {
-        val folder = selectedFolder.value ?: run {
+        val folder = activeFolder() ?: run {
             showToast("Please specify at least 1 folder in Settings first")
             _isSettingsOpen.value = true
             return null
@@ -255,20 +266,187 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
         return mediaStorageManager.prepareOutputFile(folder, type)
     }
 
-    fun onPhotoCaptured(file: File) {
-        val folder = selectedFolder.value ?: return
-        viewModelScope.launch {
-            val result = mediaStorageManager.finalizeCapturedFile(folder, file, MediaType.PHOTO)
-            if (result.savedToPublicSdcard) {
-                showToast("Photo saved to ${folder.sdcardPath}")
-            } else {
-                if (result.requiresAllFilesAccess) {
-                    _needsAllFilesAccessBanner.value = true
-                }
-                showToast(result.errorMessage ?: "Saved to app storage (${folder.sdcardPath})")
+    fun captureSinglePhoto(fromBurstLoop: Boolean = false) {
+        val folder = activeFolder() ?: run {
+            stopPhotoBurst()
+            showToast("Please specify at least 1 folder in Settings first")
+            _isSettingsOpen.value = true
+            return
+        }
+
+        if (!cameraManager.canEnqueueBurstShot()) {
+            if (!fromBurstLoop) {
+                showToast("Finishing previous shots…")
             }
+            return
+        }
+
+        photoFeedbackResetJob?.cancel()
+        val stagedFile = mediaStorageManager.prepareFastPhotoFile(folder)
+
+        _photoFeedback.update { current ->
+            current.copy(
+                triggerCounter = current.triggerCounter + 1,
+                inFlightCounter = current.inFlightCounter + 1,
+                isBurstActive = fromBurstLoop || current.isBurstActive,
+                lastFlashTriggerId = current.lastFlashTriggerId + 1L,
+                targetFolderPath = folder.sdcardPath,
+                summaryMessage = null,
+                isVisible = true
+            )
+        }
+
+        cameraManager.takePhoto(
+            outputFile = stagedFile,
+            onSuccess = { savedFile ->
+                onPhotoCapturedToFolder(folder, savedFile)
+            },
+            onError = { err ->
+                onPhotoCaptureFailed(err, silentIfBurst = fromBurstLoop)
+            }
+        )
+    }
+
+    fun startPhotoBurst() {
+        val folder = activeFolder() ?: run {
+            showToast("Please specify at least 1 folder in Settings first")
+            _isSettingsOpen.value = true
+            return
+        }
+        if (_captureState.value != CaptureState.IDLE) return
+
+        burstJob?.cancel()
+        photoFeedbackResetJob?.cancel()
+        _photoFeedback.update { current ->
+            current.copy(
+                isBurstActive = true,
+                targetFolderPath = folder.sdcardPath,
+                summaryMessage = null,
+                isVisible = true
+            )
+        }
+
+        burstJob = viewModelScope.launch(Dispatchers.Main.immediate) {
+            captureSinglePhoto(fromBurstLoop = true)
+            while (isActive) {
+                delay(130)
+                captureSinglePhoto(fromBurstLoop = true)
+            }
+        }
+    }
+
+    fun stopPhotoBurst() {
+        val wasBursting = burstJob != null || _photoFeedback.value.isBurstActive
+        burstJob?.cancel()
+        burstJob = null
+        if (wasBursting) {
+            _photoFeedback.update { current ->
+                val doneSaving = current.inFlightCounter == 0 && current.savedCounter > 0
+                current.copy(
+                    isBurstActive = false,
+                    summaryMessage = if (doneSaving) {
+                        buildSavedSummary(current.savedCounter, current.targetFolderPath)
+                    } else {
+                        current.summaryMessage
+                    }
+                )
+            }
+            schedulePhotoFeedbackResetIfIdle()
+        }
+    }
+
+    fun onPhotoCaptured(file: File) {
+        val folder = activeFolder() ?: return
+        onPhotoCapturedToFolder(folder, file)
+    }
+
+    private fun onPhotoCapturedToFolder(folder: MediaFolder, file: File) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = mediaStorageManager.finalizeCapturedFile(folder, file, MediaType.PHOTO)
+            if (result.requiresAllFilesAccess) {
+                _needsAllFilesAccessBanner.value = true
+            }
+
+            var shouldRefreshAndReset = false
+            _photoFeedback.update { current ->
+                val nextSaved = current.savedCounter + 1
+                val nextInFlight = (current.inFlightCounter - 1).coerceAtLeast(0)
+                val settled = nextInFlight == 0 && !current.isBurstActive
+                if (settled) {
+                    shouldRefreshAndReset = true
+                }
+                val summary = if (settled) {
+                    if (result.savedToPublicSdcard) {
+                        buildSavedSummary(nextSaved, folder.sdcardPath)
+                    } else {
+                        result.errorMessage ?: "Saved to app storage (${folder.sdcardPath})"
+                    }
+                } else {
+                    null
+                }
+                current.copy(
+                    triggerCounter = maxOf(current.triggerCounter, nextSaved),
+                    savedCounter = nextSaved,
+                    inFlightCounter = nextInFlight,
+                    targetFolderPath = folder.sdcardPath,
+                    summaryMessage = summary,
+                    isVisible = true
+                )
+            }
+
+            if (shouldRefreshAndReset) {
+                refreshFolderMedia()
+                refreshAllFolderCounts()
+                schedulePhotoFeedbackResetIfIdle()
+            }
+        }
+    }
+
+    private fun onPhotoCaptureFailed(message: String, silentIfBurst: Boolean) {
+        var settled = false
+        _photoFeedback.update { current ->
+            val nextInFlight = (current.inFlightCounter - 1).coerceAtLeast(0)
+            settled = nextInFlight == 0 && !current.isBurstActive
+            val summary = if (settled && current.savedCounter > 0) {
+                buildSavedSummary(current.savedCounter, current.targetFolderPath)
+            } else {
+                current.summaryMessage
+            }
+            current.copy(
+                inFlightCounter = nextInFlight,
+                summaryMessage = summary,
+                isVisible = current.savedCounter > 0 || nextInFlight > 0 || current.isBurstActive
+            )
+        }
+        if (!silentIfBurst) {
+            showToast(message)
+        }
+        if (settled) {
             refreshFolderMedia()
             refreshAllFolderCounts()
+            schedulePhotoFeedbackResetIfIdle()
+        }
+    }
+
+    private fun buildSavedSummary(count: Int, sdcardPath: String): String {
+        return if (count > 1) {
+            "Saved $count photos to $sdcardPath"
+        } else {
+            "Saved photo to $sdcardPath"
+        }
+    }
+
+    private fun schedulePhotoFeedbackResetIfIdle() {
+        val snap = _photoFeedback.value
+        if (snap.isBurstActive || snap.inFlightCounter > 0) return
+
+        photoFeedbackResetJob?.cancel()
+        photoFeedbackResetJob = viewModelScope.launch {
+            delay(2400)
+            val latest = _photoFeedback.value
+            if (!latest.isBurstActive && latest.inFlightCounter == 0) {
+                _photoFeedback.value = PhotoCaptureFeedbackState()
+            }
         }
     }
 
@@ -420,6 +598,8 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
 
     override fun onCleared() {
         super.onCleared()
+        burstJob?.cancel()
+        photoFeedbackResetJob?.cancel()
         videoTimerJob?.cancel()
         audioRecorderManager.cancelRecording()
         cameraManager.release()
