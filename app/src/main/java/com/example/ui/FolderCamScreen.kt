@@ -161,7 +161,7 @@ fun FolderCamScreen(
 
     // HorizontalPager for Audio (0, default) -> Photo (1) -> Video (2)
     val pagerState = rememberPagerState(
-        initialPage = RecorderMode.AUDIO.index,
+        initialPage = recorderMode.index,
         pageCount = { RecorderMode.entries.size }
     )
 

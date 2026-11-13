@@ -2,6 +2,8 @@ package com.example
 
 import android.app.Application
 import android.content.Context
+import android.util.Size
+import android.view.Surface
 import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ApplicationProvider
 import com.example.camera.CameraManager
@@ -222,5 +224,28 @@ class ExampleRobolectricTest {
         File("/sdcard/DCIM/BurstCam/${staged2.name}").delete()
         staged1.delete()
         staged2.delete()
+    }
+
+    @Test
+    fun `12MP resolution ranking prefers 12MP over 3MP 1920x1440 and oversized 50MP`() {
+        val deviceSizes = listOf(
+            Size(1920, 1440),  // ~2.8MP (3MP)
+            Size(8160, 6120),  // ~50MP
+            Size(4032, 3024),  // ~12.2MP (4:3)
+            Size(4000, 2250),  // ~9MP (16:9)
+            Size(1280, 960)    // ~1.2MP
+        )
+
+        val ranked = CameraManager.rankPhotoSizesFor12Mp(deviceSizes)
+        assertEquals(Size(4032, 3024), ranked.first())
+    }
+
+    @Test
+    fun `autorotation maps physical sensor angles to Surface rotations`() {
+        assertEquals(Surface.ROTATION_0, CameraManager.mapSensorOrientationToSurfaceRotation(0))
+        assertEquals(Surface.ROTATION_0, CameraManager.mapSensorOrientationToSurfaceRotation(350))
+        assertEquals(Surface.ROTATION_270, CameraManager.mapSensorOrientationToSurfaceRotation(90))
+        assertEquals(Surface.ROTATION_180, CameraManager.mapSensorOrientationToSurfaceRotation(180))
+        assertEquals(Surface.ROTATION_90, CameraManager.mapSensorOrientationToSurfaceRotation(270))
     }
 }

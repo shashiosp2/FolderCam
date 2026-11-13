@@ -4,8 +4,12 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager as SystemCameraManager
+import android.hardware.display.DisplayManager
 import android.util.Range
 import android.util.Size
+import android.view.Display
+import android.view.OrientationEventListener
+import android.view.Surface
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
@@ -13,6 +17,7 @@ import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
 import androidx.camera.core.UseCase
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
+import androidx.camera.core.resolutionselector.ResolutionFilter
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -40,6 +45,7 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 data class LensOption(
     val id: String,
@@ -111,9 +117,50 @@ class CameraManager(private val context: Context) {
     companion object {
         // Default 12 Megapixel (4000 x 3000 = 12,000,000 pixels, 4:3 sensor aspect ratio)
         val DEFAULT_PHOTO_12MP_SIZE = Size(4000, 3000)
+        private const val TARGET_PHOTO_12MP_PIXELS = 12_000_000L
+        // Threshold to catch devices where ZSL caps ImageCapture down to 1920x1440 (~2.76MP / 3MP)
+        private const val MIN_FULL_RES_PHOTO_PIXELS = 8_000_000L
         // Default 30 FPS range for 4K video recording
         val DEFAULT_VIDEO_30FPS_RANGE = Range(30, 30)
         const val MAX_IN_FLIGHT_BURST = 6
+
+        fun mapSensorOrientationToSurfaceRotation(orientation: Int): Int {
+            return when (orientation) {
+                in 45 until 135 -> Surface.ROTATION_270
+                in 135 until 225 -> Surface.ROTATION_180
+                in 225 until 315 -> Surface.ROTATION_90
+                else -> Surface.ROTATION_0
+            }
+        }
+
+        fun rankPhotoSizesFor12Mp(supportedSizes: List<Size>): List<Size> {
+            val target4By3Ratio = 4.0 / 3.0
+            return supportedSizes.sortedWith(
+                compareBy<Size>(
+                    { size ->
+                        val px = size.width.toLong() * size.height.toLong()
+                        when {
+                            px in 10_000_000L..16_000_000L -> 0
+                            px >= MIN_FULL_RES_PHOTO_PIXELS -> 1
+                            else -> 2
+                        }
+                    },
+                    { size ->
+                        val px = size.width.toLong() * size.height.toLong()
+                        if (px >= MIN_FULL_RES_PHOTO_PIXELS) {
+                            abs(px - TARGET_PHOTO_12MP_PIXELS)
+                        } else {
+                            -px
+                        }
+                    },
+                    { size ->
+                        val ratio = maxOf(size.width, size.height).toDouble() /
+                            minOf(size.width, size.height).coerceAtLeast(1).toDouble()
+                        abs(ratio - target4By3Ratio)
+                    }
+                )
+            )
+        }
     }
 
     val backgroundLifecycleOwner = BackgroundCameraLifecycleOwner()
@@ -138,6 +185,47 @@ class CameraManager(private val context: Context) {
     private var activeMode: RecorderMode = RecorderMode.AUDIO
     private var isProviderRequestInFlight = false
 
+    @Volatile
+    private var currentTargetRotation: Int = Surface.ROTATION_0
+
+    @Volatile
+    private var hasSensorRotation: Boolean = false
+
+    private var isDisplayListenerRegistered = false
+    private val displayManager: DisplayManager? by lazy {
+        context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+    }
+
+    private val displayListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) = Unit
+        override fun onDisplayRemoved(displayId: Int) = Unit
+        override fun onDisplayChanged(displayId: Int) {
+            val previewDisplay = lastPreviewView?.display
+            if (previewDisplay == null || previewDisplay.displayId == displayId) {
+                val displayRot = previewDisplay?.rotation
+                    ?: displayManager?.getDisplay(Display.DEFAULT_DISPLAY)?.rotation
+                if (displayRot != null && !hasSensorRotation) {
+                    applyTargetRotation(displayRot)
+                }
+            }
+        }
+    }
+
+    private val orientationEventListener: OrientationEventListener? by lazy {
+        try {
+            object : OrientationEventListener(context.applicationContext) {
+                override fun onOrientationChanged(orientation: Int) {
+                    if (orientation == ORIENTATION_UNKNOWN) return
+                    val rotation = mapSensorOrientationToSurfaceRotation(orientation)
+                    hasSensorRotation = true
+                    applyTargetRotation(rotation)
+                }
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     private val _cameraState = MutableStateFlow(CameraUiState())
     val cameraState: StateFlow<CameraUiState> = _cameraState.asStateFlow()
 
@@ -147,9 +235,63 @@ class CameraManager(private val context: Context) {
     var isTorchEnabled: Boolean = false
         private set
 
+    private fun applyTargetRotation(rotation: Int) {
+        currentTargetRotation = rotation
+        imageCapture?.targetRotation = rotation
+        if (!isRecordingVideo()) {
+            videoCapture?.targetRotation = rotation
+        }
+    }
+
+    private fun resolveCurrentRotation(previewView: PreviewView?): Int {
+        if (hasSensorRotation) {
+            return currentTargetRotation
+        }
+        val displayRot = previewView?.display?.rotation
+            ?: displayManager?.getDisplay(Display.DEFAULT_DISPLAY)?.rotation
+            ?: currentTargetRotation
+        currentTargetRotation = displayRot
+        return displayRot
+    }
+
+    private fun startOrientationTracking() {
+        try {
+            if (orientationEventListener?.canDetectOrientation() == true) {
+                orientationEventListener?.enable()
+            }
+        } catch (e: Exception) {
+            // Ignore in headless/test environments
+        }
+        if (!isDisplayListenerRegistered) {
+            try {
+                displayManager?.registerDisplayListener(displayListener, null)
+                isDisplayListenerRegistered = true
+            } catch (e: Exception) {
+                // Ignore
+            }
+        }
+    }
+
+    private fun stopOrientationTracking() {
+        try {
+            orientationEventListener?.disable()
+        } catch (e: Exception) {
+            // Ignore
+        }
+        if (isDisplayListenerRegistered) {
+            try {
+                displayManager?.unregisterDisplayListener(displayListener)
+            } catch (e: Exception) {
+                // Ignore
+            }
+            isDisplayListenerRegistered = false
+        }
+    }
+
     fun onHostStop() {
         isHostForeground = false
         if (!isRecordingVideo()) {
+            stopOrientationTracking()
             unbindCameraInternal()
         }
     }
@@ -158,9 +300,11 @@ class CameraManager(private val context: Context) {
         isHostForeground = true
         activeMode = mode
         if (mode == RecorderMode.AUDIO && !isRecordingVideo()) {
+            stopOrientationTracking()
             unbindCameraInternal()
             return
         }
+        startOrientationTracking()
         if (previewView != null) {
             bindOrAttachPreview(previewView, mode)
         }
@@ -370,20 +514,32 @@ class CameraManager(private val context: Context) {
             CameraSelector.DEFAULT_BACK_CAMERA
         }
 
+        if (isHostForeground) {
+            startOrientationTracking()
+        }
+        val initialRotation = resolveCurrentRotation(previewView)
+
         val previewUseCase = Preview.Builder()
+            .setTargetRotation(initialRotation)
             .build()
             .also {
                 it.surfaceProvider = previewView.surfaceProvider
             }
 
+        val photo12MpFilter = ResolutionFilter { supportedSizes, _ ->
+            rankPhotoSizesFor12Mp(supportedSizes)
+        }
+
         val photo12MpResolutionSelector = ResolutionSelector.Builder()
             .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
+            .setAllowedResolutionMode(ResolutionSelector.PREFER_HIGHER_RESOLUTION_OVER_CAPTURE_RATE)
             .setResolutionStrategy(
                 ResolutionStrategy(
                     DEFAULT_PHOTO_12MP_SIZE,
                     ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
                 )
             )
+            .setResolutionFilter(photo12MpFilter)
             .build()
 
         var boundCamera: Camera? = null
@@ -403,6 +559,7 @@ class CameraManager(private val context: Context) {
                 .build()
             val video4k30UseCase = VideoCapture.Builder(recorder4k)
                 .setTargetFrameRate(DEFAULT_VIDEO_30FPS_RANGE)
+                .setTargetRotation(initialRotation)
                 .build()
 
             boundCamera = tryBindUseCases(
@@ -421,7 +578,9 @@ class CameraManager(private val context: Context) {
                         )
                     )
                     .build()
-                val adaptiveVideoUseCase = VideoCapture.Builder(fallbackRecorder).build()
+                val adaptiveVideoUseCase = VideoCapture.Builder(fallbackRecorder)
+                    .setTargetRotation(initialRotation)
+                    .build()
                 boundCamera = tryBindUseCases(
                     provider = provider,
                     selector = cameraSelector,
@@ -433,40 +592,98 @@ class CameraManager(private val context: Context) {
                 }
             }
         } else {
-            // Photo Mode: Dedicated Photo binding without simultaneous VideoCapture unlocks Zero Shutter Lag!
-            val zslImage12MpUseCase = ImageCapture.Builder()
-                .setCaptureMode(ImageCapture.CAPTURE_MODE_ZERO_SHUTTER_LAG)
-                .setFlashMode(ImageCapture.FLASH_MODE_OFF)
-                .setResolutionSelector(photo12MpResolutionSelector)
-                .build()
-
-            boundCamera = tryBindUseCases(
+            // Photo Mode: Try ZSL at 12MP first; if hardware ZSL caps resolution below 8MP (e.g. 1920x1440 / 3MP),
+            // automatically upgrade to MINIMIZE_LATENCY / MAXIMIZE_QUALITY with full 12MP resolution.
+            val zslCandidate = buildPhotoUseCase(
+                captureMode = ImageCapture.CAPTURE_MODE_ZERO_SHUTTER_LAG,
+                selector = photo12MpResolutionSelector,
+                targetRotation = initialRotation
+            )
+            val zslCamera = tryBindUseCases(
                 provider = provider,
                 selector = cameraSelector,
-                useCases = arrayOf(previewUseCase, zslImage12MpUseCase)
+                useCases = arrayOf(previewUseCase, zslCandidate)
             )
-            if (boundCamera != null) {
-                activeImageCapture = zslImage12MpUseCase
+            val zslPixels = resolutionPixelCount(zslCandidate)
+            val zslMeets12Mp = zslCamera != null && (zslPixels == 0L || zslPixels >= MIN_FULL_RES_PHOTO_PIXELS)
+
+            if (zslMeets12Mp) {
+                boundCamera = zslCamera
+                activeImageCapture = zslCandidate
                 usedZslBuilder = true
             } else {
-                // Fallback 1: Minimize latency with 12MP resolution
-                val minLatency12Mp = ImageCapture.Builder()
-                    .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-                    .setFlashMode(ImageCapture.FLASH_MODE_OFF)
-                    .setResolutionSelector(photo12MpResolutionSelector)
-                    .build()
-                boundCamera = tryBindUseCases(
+                val minLatencyCandidate = buildPhotoUseCase(
+                    captureMode = ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY,
+                    selector = photo12MpResolutionSelector,
+                    targetRotation = initialRotation
+                )
+                val minLatencyCamera = tryBindUseCases(
                     provider = provider,
                     selector = cameraSelector,
-                    useCases = arrayOf(previewUseCase, minLatency12Mp)
+                    useCases = arrayOf(previewUseCase, minLatencyCandidate)
                 )
-                if (boundCamera != null) {
-                    activeImageCapture = minLatency12Mp
+                val minLatencyPixels = resolutionPixelCount(minLatencyCandidate)
+
+                if (minLatencyCamera != null && (minLatencyPixels >= MIN_FULL_RES_PHOTO_PIXELS || zslCamera == null)) {
+                    boundCamera = minLatencyCamera
+                    activeImageCapture = minLatencyCandidate
                 } else {
-                    // Fallback 2: Minimize latency with device default resolution
+                    val maxQualityCandidate = buildPhotoUseCase(
+                        captureMode = ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY,
+                        selector = photo12MpResolutionSelector,
+                        targetRotation = initialRotation
+                    )
+                    val maxQualityCamera = tryBindUseCases(
+                        provider = provider,
+                        selector = cameraSelector,
+                        useCases = arrayOf(previewUseCase, maxQualityCandidate)
+                    )
+                    val maxQualityPixels = resolutionPixelCount(maxQualityCandidate)
+
+                    when {
+                        maxQualityCamera != null && maxQualityPixels >= maxOf(zslPixels, minLatencyPixels) -> {
+                            boundCamera = maxQualityCamera
+                            activeImageCapture = maxQualityCandidate
+                        }
+                        zslCamera != null && zslPixels >= minLatencyPixels -> {
+                            val reboundZsl = buildPhotoUseCase(
+                                captureMode = ImageCapture.CAPTURE_MODE_ZERO_SHUTTER_LAG,
+                                selector = photo12MpResolutionSelector,
+                                targetRotation = initialRotation
+                            )
+                            boundCamera = tryBindUseCases(
+                                provider = provider,
+                                selector = cameraSelector,
+                                useCases = arrayOf(previewUseCase, reboundZsl)
+                            )
+                            if (boundCamera != null) {
+                                activeImageCapture = reboundZsl
+                                usedZslBuilder = true
+                            }
+                        }
+                        minLatencyCamera != null -> {
+                            val reboundMinLatency = buildPhotoUseCase(
+                                captureMode = ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY,
+                                selector = photo12MpResolutionSelector,
+                                targetRotation = initialRotation
+                            )
+                            boundCamera = tryBindUseCases(
+                                provider = provider,
+                                selector = cameraSelector,
+                                useCases = arrayOf(previewUseCase, reboundMinLatency)
+                            )
+                            if (boundCamera != null) {
+                                activeImageCapture = reboundMinLatency
+                            }
+                        }
+                    }
+                }
+
+                if (boundCamera == null) {
                     val autoImageUseCase = ImageCapture.Builder()
                         .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
                         .setFlashMode(ImageCapture.FLASH_MODE_OFF)
+                        .setTargetRotation(initialRotation)
                         .build()
                     boundCamera = tryBindUseCases(
                         provider = provider,
@@ -535,6 +752,11 @@ class CameraManager(private val context: Context) {
             }
         }
 
+        val actualPhotoLabel = activeImageCapture?.resolutionInfo?.resolution?.let { res ->
+            val mp = ((res.width.toLong() * res.height.toLong()) / 1_000_000.0).roundToInt().coerceAtLeast(1)
+            "${mp}MP"
+        } ?: "12MP"
+
         _cameraState.value = CameraUiState(
             isFrontCamera = isFrontCamera,
             isTorchEnabled = isTorchEnabled,
@@ -544,10 +766,29 @@ class CameraManager(private val context: Context) {
             maxZoomRatio = maxZoom,
             lensOptions = discoveredLenses,
             selectedLensId = selectedLensId,
-            photoResolution = "12MP",
+            photoResolution = actualPhotoLabel,
             videoResolution = effectiveVideoLabel,
             cameraError = null
         )
+    }
+
+    @SuppressLint("UnsafeOptInUsageError")
+    private fun buildPhotoUseCase(
+        captureMode: Int,
+        selector: ResolutionSelector,
+        targetRotation: Int
+    ): ImageCapture {
+        return ImageCapture.Builder()
+            .setCaptureMode(captureMode)
+            .setFlashMode(ImageCapture.FLASH_MODE_OFF)
+            .setResolutionSelector(selector)
+            .setTargetRotation(targetRotation)
+            .build()
+    }
+
+    private fun resolutionPixelCount(imageCapture: ImageCapture?): Long {
+        val res = imageCapture?.resolutionInfo?.resolution ?: return 0L
+        return res.width.toLong() * res.height.toLong()
     }
 
     private fun tryBindUseCases(
@@ -676,6 +917,7 @@ class CameraManager(private val context: Context) {
 
         inFlightImageCaptures.incrementAndGet()
         try {
+            capture.targetRotation = resolveCurrentRotation(lastPreviewView)
             outputFile.parentFile?.mkdirs()
             val outputOptions = ImageCapture.OutputFileOptions.Builder(outputFile).build()
             capture.takePicture(
@@ -719,14 +961,15 @@ class CameraManager(private val context: Context) {
         }
 
         try {
+            capture.targetRotation = resolveCurrentRotation(lastPreviewView)
             outputFile.parentFile?.mkdirs()
             backgroundLifecycleOwner.moveToResumed()
             val outputOptions = FileOutputOptions.Builder(outputFile).build()
 
-            val pendingRecording = capture.output.prepareRecording(context, outputOptions)
+            var pendingRecording = capture.output.prepareRecording(context, outputOptions)
             if (enableAudio) {
                 try {
-                    pendingRecording.withAudioEnabled()
+                    pendingRecording = pendingRecording.withAudioEnabled()
                 } catch (e: SecurityException) {
                     // Audio permission might not be granted, continue video-only
                 }
@@ -748,6 +991,7 @@ class CameraManager(private val context: Context) {
                             onError(errorMsg)
                         }
                         if (!isHostForeground) {
+                            stopOrientationTracking()
                             unbindCameraInternal()
                         }
                     }
@@ -773,6 +1017,7 @@ class CameraManager(private val context: Context) {
     fun isRecordingVideo(): Boolean = isRecordingActiveOrFinalizing || currentRecording != null
 
     fun release() {
+        stopOrientationTracking()
         stopVideoRecording()
         unbindCameraInternal()
         backgroundLifecycleOwner.destroy()
