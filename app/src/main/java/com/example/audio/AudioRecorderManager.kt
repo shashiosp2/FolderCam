@@ -30,38 +30,47 @@ class AudioRecorderManager(private val context: Context) {
     private val amplitudeHistory = mutableListOf<Float>()
     private val maxBars = 45
 
-    fun startRecording(outputFile: File, scope: CoroutineScope): Boolean {
+    fun startRecording(
+        outputFile: File,
+        scope: CoroutineScope,
+        fallbackFile: File? = null
+    ): Boolean {
         try {
             stopRecording() // Clean up any lingering recording
 
-            currentFile = outputFile
+            val targetFile = tryCreateRecorderFile(outputFile, fallbackFile) ?: run {
+                cleanup()
+                return false
+            }
+
+            currentFile = targetFile
             amplitudeHistory.clear()
 
-            val recorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                MediaRecorder(context)
-            } else {
-                @Suppress("DEPRECATION")
-                MediaRecorder()
+            val recorder = createMediaRecorder(targetFile) ?: run {
+                // Retry with fallbackFile if primary target failed on /sdcard FUSE
+                if (fallbackFile != null && fallbackFile.absolutePath != targetFile.absolutePath) {
+                    if (targetFile.exists() && targetFile.length() == 0L) {
+                        targetFile.delete()
+                    }
+                    fallbackFile.parentFile?.mkdirs()
+                    currentFile = fallbackFile
+                    createMediaRecorder(fallbackFile)
+                } else {
+                    null
+                }
+            } ?: run {
+                cleanup()
+                return false
             }
 
-            recorder.apply {
-                setAudioSource(MediaRecorder.AudioSource.MIC)
-                setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-                setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-                setAudioEncodingBitRate(128000)
-                setAudioSamplingRate(44100)
-                setOutputFile(outputFile.absolutePath)
-                prepare()
-                start()
-            }
-
+            val activeFile = currentFile ?: targetFile
             mediaRecorder = recorder
             _status.value = RecordingStatus(
                 state = CaptureState.RECORDING_AUDIO,
                 durationSeconds = 0,
                 amplitudes = emptyList(),
                 currentDecibels = 0f,
-                currentOutputFilePath = outputFile.absolutePath
+                currentOutputFilePath = activeFile.absolutePath
             )
 
             val startTime = System.currentTimeMillis()
@@ -95,7 +104,7 @@ class AudioRecorderManager(private val context: Context) {
                         durationSeconds = elapsedSec,
                         amplitudes = amplitudeHistory.toList(),
                         currentDecibels = db,
-                        currentOutputFilePath = outputFile.absolutePath
+                        currentOutputFilePath = activeFile.absolutePath
                     )
                 }
             }
@@ -159,5 +168,49 @@ class AudioRecorderManager(private val context: Context) {
         mediaRecorder = null
         currentFile = null
         _status.value = RecordingStatus(state = CaptureState.IDLE)
+    }
+
+    private fun tryCreateRecorderFile(primary: File, fallback: File?): File? {
+        return try {
+            primary.parentFile?.mkdirs()
+            primary
+        } catch (e: Exception) {
+            if (fallback != null) {
+                fallback.parentFile?.mkdirs()
+                fallback
+            } else {
+                null
+            }
+        }
+    }
+
+    private fun createMediaRecorder(targetFile: File): MediaRecorder? {
+        val recorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            MediaRecorder(context)
+        } else {
+            @Suppress("DEPRECATION")
+            MediaRecorder()
+        }
+        return try {
+            recorder.apply {
+                setAudioSource(MediaRecorder.AudioSource.MIC)
+                setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+                setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                setAudioEncodingBitRate(128000)
+                setAudioSamplingRate(44100)
+                setOutputFile(targetFile.absolutePath)
+                prepare()
+                start()
+            }
+            recorder
+        } catch (e: Exception) {
+            e.printStackTrace()
+            try {
+                recorder.reset()
+                recorder.release()
+            } catch (ignored: Exception) {
+            }
+            null
+        }
     }
 }

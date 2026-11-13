@@ -1,8 +1,12 @@
 package com.example.ui
 
 import android.Manifest
+import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.view.PreviewView
@@ -16,6 +20,7 @@ import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
@@ -42,20 +47,24 @@ import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -66,6 +75,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.model.CaptureState
 import com.example.model.MediaType
 import com.example.model.RecorderMode
@@ -96,6 +108,8 @@ fun FolderCamScreen(
     val toastMessage by viewModel.toastMessage.collectAsState()
     val isSettingsOpen by viewModel.isSettingsOpen.collectAsState()
     val isGalleryOpen by viewModel.isGalleryOpen.collectAsState()
+    val hasAllFilesAccess by viewModel.hasAllFilesAccess.collectAsState()
+    val needsAllFilesAccessBanner by viewModel.needsAllFilesAccessBanner.collectAsState()
 
     var hasCameraPermission by remember {
         mutableStateOf(
@@ -159,6 +173,60 @@ fun FolderCamScreen(
     val cameraUiState by cameraManager.cameraState.collectAsState()
     var previewViewRef by remember { mutableStateOf<PreviewView?>(null) }
     var isFlashOn by remember { mutableStateOf(false) }
+    var isHostForeground by remember { mutableStateOf(true) }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val latestRecorderMode by rememberUpdatedState(recorderMode)
+    val latestPreviewView by rememberUpdatedState(previewViewRef)
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> {
+                    val camGranted = ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.CAMERA
+                    ) == PackageManager.PERMISSION_GRANTED
+                    val audioGranted = ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.RECORD_AUDIO
+                    ) == PackageManager.PERMISSION_GRANTED
+                    hasCameraPermission = camGranted
+                    hasAudioPermission = audioGranted
+                    isHostForeground = true
+                    viewModel.onHostResume()
+                    cameraManager.onHostResume(
+                        previewView = if (camGranted) latestPreviewView else null,
+                        mode = latestRecorderMode
+                    )
+                }
+                Lifecycle.Event.ON_STOP -> {
+                    isHostForeground = false
+                    cameraManager.onHostStop()
+                }
+                else -> {}
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    // Deterministically bind/unbind CameraX based on current mode, permission, foreground state, and PreviewView
+    LaunchedEffect(previewViewRef, recorderMode, captureState, hasCameraPermission, isHostForeground) {
+        if (recorderMode == RecorderMode.AUDIO || captureState == CaptureState.RECORDING_AUDIO) {
+            cameraManager.unbindCameraIfIdle()
+        } else if (hasCameraPermission && isHostForeground && previewViewRef != null) {
+            cameraManager.bindOrAttachPreview(previewViewRef!!, recorderMode)
+        }
+    }
+
+    LaunchedEffect(cameraUiState.cameraError) {
+        cameraUiState.cameraError?.let { err ->
+            viewModel.showToast(err)
+        }
+    }
 
     LaunchedEffect(toastMessage) {
         if (toastMessage != null) {
@@ -341,16 +409,22 @@ fun FolderCamScreen(
             // Shared CameraX Viewfinder layer for Photo & Video modes
             if (recorderMode != RecorderMode.AUDIO && captureState != CaptureState.RECORDING_AUDIO) {
                 if (hasCameraPermission) {
+                    DisposableEffect(Unit) {
+                        onDispose {
+                            previewViewRef = null
+                        }
+                    }
                     AndroidView(
                         factory = { ctx ->
                             PreviewView(ctx).apply {
+                                implementationMode = PreviewView.ImplementationMode.COMPATIBLE
                                 previewViewRef = this
-                                cameraManager.attachPreviewView(this)
                             }
                         },
                         update = { view ->
-                            previewViewRef = view
-                            cameraManager.attachPreviewView(view)
+                            if (previewViewRef !== view) {
+                                previewViewRef = view
+                            }
                         },
                         modifier = Modifier
                             .fillMaxSize()
@@ -478,7 +552,7 @@ fun FolderCamScreen(
                 exit = fadeOut() + slideOutVertically(targetOffsetY = { -it }),
                 modifier = Modifier
                     .align(Alignment.TopCenter)
-                    .padding(top = 12.dp)
+                    .padding(top = 12.dp, start = 16.dp, end = 16.dp)
             ) {
                 toastMessage?.let { msg ->
                     Surface(
@@ -497,6 +571,46 @@ fun FolderCamScreen(
                     }
                 }
             }
+
+            // Actionable Material 3 Storage Access Card when saving cross-media into /sdcard requires All Files Access
+            if (needsAllFilesAccessBanner && !hasAllFilesAccess && !isSettingsOpen) {
+                ElevatedCard(
+                    shape = MaterialTheme.shapes.large,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 12.dp)
+                        .testTag("all_files_access_banner")
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "Grant /sdcard All Files Access",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "Android blocks saving cross-type media (such as audio in DCIM/Camera or photos in Recordings) without All Files Access.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colorScheme.onSurfaceVariant
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End
+                        ) {
+                            TextButton(onClick = { viewModel.dismissAllFilesAccessBanner() }) {
+                                Text("Later")
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            FilledTonalButton(onClick = { launchAllFilesAccessSettings(context) }) {
+                                Text("Grant Access")
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -507,6 +621,8 @@ fun FolderCamScreen(
             selectedFolderId = selectedFolder?.id,
             folderCounts = folderCounts,
             isDarkTheme = isDarkTheme,
+            hasAllFilesAccess = hasAllFilesAccess,
+            onRequestAllFilesAccess = { launchAllFilesAccessSettings(context) },
             onToggleDarkTheme = { isDark ->
                 viewModel.setDarkTheme(isDark)
             },
@@ -613,6 +729,29 @@ private fun CameraPermissionCard(
                 Button(onClick = onRequestPermission) {
                     Text("Grant Permissions")
                 }
+            }
+        }
+    }
+}
+
+private fun launchAllFilesAccessSettings(context: Context) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        try {
+            val intent = Intent(
+                Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                Uri.parse("package:${context.packageName}")
+            ).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+        } catch (e: Exception) {
+            try {
+                val fallback = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(fallback)
+            } catch (ignored: Exception) {
+                // Ignore if Settings screen unavailable
             }
         }
     }

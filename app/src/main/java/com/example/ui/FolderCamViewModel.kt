@@ -82,12 +82,20 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
     private val _isGalleryOpen = MutableStateFlow(false)
     val isGalleryOpen: StateFlow<Boolean> = _isGalleryOpen.asStateFlow()
 
+    private val _hasAllFilesAccess = MutableStateFlow(mediaStorageManager.hasAllFilesAccess())
+    val hasAllFilesAccess: StateFlow<Boolean> = _hasAllFilesAccess.asStateFlow()
+
+    private val _needsAllFilesAccessBanner = MutableStateFlow(false)
+    val needsAllFilesAccessBanner: StateFlow<Boolean> = _needsAllFilesAccessBanner.asStateFlow()
+
     init {
         RecordingServiceBridge.onStopRequested = {
-            when (_captureState.value) {
-                CaptureState.RECORDING_AUDIO -> stopAudioRecording()
-                CaptureState.RECORDING_VIDEO -> cameraManager.stopVideoRecording()
-                CaptureState.IDLE -> RecordingForegroundService.stop(appContext)
+            viewModelScope.launch(Dispatchers.Main.immediate) {
+                when (_captureState.value) {
+                    CaptureState.RECORDING_AUDIO -> stopAudioRecording()
+                    CaptureState.RECORDING_VIDEO -> cameraManager.stopVideoRecording()
+                    CaptureState.IDLE -> RecordingForegroundService.stop(appContext)
+                }
             }
         }
 
@@ -101,6 +109,21 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
                 refreshAllFolderCounts()
             }
         }
+    }
+
+    fun onHostResume() {
+        val granted = mediaStorageManager.hasAllFilesAccess()
+        _hasAllFilesAccess.value = granted
+        if (granted) {
+            _needsAllFilesAccessBanner.value = false
+            folderRepository.syncWithSdcardOnResume()
+        }
+        refreshAllFolderCounts()
+        refreshFolderMedia()
+    }
+
+    fun dismissAllFilesAccessBanner() {
+        _needsAllFilesAccessBanner.value = false
     }
 
     fun toggleDarkTheme() {
@@ -145,6 +168,9 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
             stopAudioRecording()
         }
         _recorderMode.value = mode
+        if (mode == RecorderMode.AUDIO) {
+            cameraManager.unbindCameraIfIdle()
+        }
     }
 
     fun selectFolder(folder: MediaFolder) {
@@ -232,8 +258,15 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
     fun onPhotoCaptured(file: File) {
         val folder = selectedFolder.value ?: return
         viewModelScope.launch {
-            mediaStorageManager.finalizeCapturedFile(folder, file, MediaType.PHOTO)
-            showToast("Photo saved to ${folder.sdcardPath}")
+            val result = mediaStorageManager.finalizeCapturedFile(folder, file, MediaType.PHOTO)
+            if (result.savedToPublicSdcard) {
+                showToast("Photo saved to ${folder.sdcardPath}")
+            } else {
+                if (result.requiresAllFilesAccess) {
+                    _needsAllFilesAccessBanner.value = true
+                }
+                showToast(result.errorMessage ?: "Saved to app storage (${folder.sdcardPath})")
+            }
             refreshFolderMedia()
             refreshAllFolderCounts()
         }
@@ -270,8 +303,15 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
 
         val folder = selectedFolder.value ?: return
         viewModelScope.launch {
-            mediaStorageManager.finalizeCapturedFile(folder, file, MediaType.VIDEO)
-            showToast("Video saved to ${folder.sdcardPath}")
+            val result = mediaStorageManager.finalizeCapturedFile(folder, file, MediaType.VIDEO)
+            if (result.savedToPublicSdcard) {
+                showToast("Video saved to ${folder.sdcardPath}")
+            } else {
+                if (result.requiresAllFilesAccess) {
+                    _needsAllFilesAccessBanner.value = true
+                }
+                showToast(result.errorMessage ?: "Saved to app storage (${folder.sdcardPath})")
+            }
             refreshFolderMedia()
             refreshAllFolderCounts()
         }
@@ -288,16 +328,26 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
     fun startAudioRecording(): Boolean {
         if (_captureState.value != CaptureState.IDLE) return false
         _recorderMode.value = RecorderMode.AUDIO
-        val folder = selectedFolder.value
+        cameraManager.unbindCameraIfIdle()
+        val folder = selectedFolder.value ?: run {
+            showToast("Please specify at least 1 folder in Settings first")
+            _isSettingsOpen.value = true
+            return false
+        }
         val outputFile = prepareOutputFile(MediaType.AUDIO) ?: return false
-        val started = audioRecorderManager.startRecording(outputFile, viewModelScope)
+        val fallbackFile = mediaStorageManager.prepareStagingFallbackFile(folder, outputFile.name)
+        val started = audioRecorderManager.startRecording(
+            outputFile = outputFile,
+            scope = viewModelScope,
+            fallbackFile = fallbackFile
+        )
         if (started) {
             _captureState.value = CaptureState.RECORDING_AUDIO
             RecordingForegroundService.start(
                 context = appContext,
                 recordingType = RecordingForegroundService.TYPE_AUDIO,
-                folderName = folder?.name ?: "Folder",
-                sdcardPath = folder?.sdcardPath ?: "/sdcard"
+                folderName = folder.name,
+                sdcardPath = folder.sdcardPath
             )
         } else {
             showToast("Failed to start audio recording")
@@ -313,8 +363,15 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
         val folder = selectedFolder.value
         if (file != null && file.exists() && folder != null) {
             viewModelScope.launch {
-                mediaStorageManager.finalizeCapturedFile(folder, file, MediaType.AUDIO)
-                showToast("Audio saved to ${folder.sdcardPath}")
+                val result = mediaStorageManager.finalizeCapturedFile(folder, file, MediaType.AUDIO)
+                if (result.savedToPublicSdcard) {
+                    showToast("Audio saved to ${folder.sdcardPath}")
+                } else {
+                    if (result.requiresAllFilesAccess) {
+                        _needsAllFilesAccessBanner.value = true
+                    }
+                    showToast(result.errorMessage ?: "Saved to app storage (${folder.sdcardPath})")
+                }
                 refreshFolderMedia()
                 refreshAllFolderCounts()
             }

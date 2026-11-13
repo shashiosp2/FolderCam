@@ -164,11 +164,16 @@ class FolderRepository(private val context: Context) {
         val normalizedPath = normalizeSdcardPath(sdcardPath, cleanName)
         val updatedList = _folders.value.map { existing ->
             if (existing.id == folderId) {
+                val pathChanged = existing.sdcardPath != normalizedPath
                 existing.copy(
                     name = cleanName,
                     sdcardPath = normalizedPath,
                     colorHex = colorHex,
-                    treeUri = treeUri ?: existing.treeUri
+                    treeUri = when {
+                        treeUri != null -> treeUri
+                        pathChanged -> null
+                        else -> existing.treeUri
+                    }
                 )
             } else {
                 existing
@@ -225,6 +230,15 @@ class FolderRepository(private val context: Context) {
             e.printStackTrace()
         }
         return false
+    }
+
+    fun syncWithSdcardOnResume() {
+        val sdcardFile = getSdcardConfigFile()
+        if (_folders.value.isEmpty() && sdcardFile.exists() && sdcardFile.canRead()) {
+            restoreFromSdcardConfigFile()
+        } else if (_folders.value.isNotEmpty()) {
+            saveSettingsToInternalAndSdcard(writeSdcard = true)
+        }
     }
 
     /**

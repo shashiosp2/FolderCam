@@ -1,5 +1,6 @@
 package com.example.ui.components
 
+import android.os.Build
 import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -74,6 +75,8 @@ fun FolderSettingsDialog(
     selectedFolderId: String?,
     folderCounts: Map<String, Int>,
     isDarkTheme: Boolean,
+    hasAllFilesAccess: Boolean,
+    onRequestAllFilesAccess: () -> Unit,
     onToggleDarkTheme: (Boolean) -> Unit,
     onRestoreFromSdcardFile: () -> Unit,
     onRestoreFromJsonContent: (String) -> Unit,
@@ -212,6 +215,63 @@ fun FolderSettingsDialog(
                             onCheckedChange = { onToggleDarkTheme(it) },
                             modifier = Modifier.testTag("settings_theme_switch")
                         )
+                    }
+                }
+
+                // All Files Access (/sdcard) Status Card for Android 11+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    OutlinedCard(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = MaterialTheme.shapes.medium,
+                        border = BorderStroke(
+                            width = 1.dp,
+                            color = if (hasAllFilesAccess) colorScheme.outlineVariant else colorScheme.primary
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 10.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = if (hasAllFilesAccess) {
+                                        "/sdcard Full Access Granted"
+                                    } else {
+                                        "Grant /sdcard All Files Access"
+                                    },
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = if (hasAllFilesAccess) colorScheme.primary else colorScheme.onSurface
+                                )
+                                Text(
+                                    text = if (hasAllFilesAccess) {
+                                        "Any media type can save to any /sdcard folder & .foldercam."
+                                    } else {
+                                        "Needed to save audio to DCIM/Camera, photos to Recordings, & sync /sdcard/.foldercam."
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colorScheme.onSurfaceVariant
+                                )
+                            }
+                            if (!hasAllFilesAccess) {
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Button(
+                                    onClick = onRequestAllFilesAccess,
+                                    modifier = Modifier.testTag("grant_all_files_access_button")
+                                ) {
+                                    Text("Allow")
+                                }
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Default.Check,
+                                    contentDescription = "All files access granted",
+                                    tint = colorScheme.primary
+                                )
+                            }
+                        }
                     }
                 }
 
@@ -612,6 +672,7 @@ fun FolderSettingsDialog(
             onCreateDirectory = onCreateSdcardDir,
             onFolderPicked = { pickedSdcardPath ->
                 sdcardLocation = pickedSdcardPath
+                selectedTreeUri = null
                 if (folderName.isBlank() && pickedSdcardPath != "/sdcard") {
                     folderName = pickedSdcardPath.substringAfterLast('/')
                 }
