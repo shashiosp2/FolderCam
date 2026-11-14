@@ -10,8 +10,11 @@ import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
 
 class FolderRepository(private val context: Context) {
+
+    private val folderIdSeq = AtomicInteger(0)
 
     private val prefs: SharedPreferences =
         context.getSharedPreferences("folder_cam_v2_prefs", Context.MODE_PRIVATE)
@@ -137,7 +140,7 @@ class FolderRepository(private val context: Context) {
     ): MediaFolder {
         val cleanName = name.trim().ifEmpty { "Folder" }
         val normalizedPath = normalizeSdcardPath(sdcardPath, cleanName)
-        val id = "folder_" + System.currentTimeMillis()
+        val id = "folder_${System.currentTimeMillis()}_${folderIdSeq.incrementAndGet()}"
         val newFolder = MediaFolder(
             id = id,
             name = cleanName,
@@ -191,6 +194,19 @@ class FolderRepository(private val context: Context) {
         if (_selectedFolderId.value == folderId) {
             _selectedFolderId.value = updatedList.firstOrNull()?.id
         }
+        saveAllSettings()
+        return true
+    }
+
+    fun moveFolder(fromIndex: Int, toIndex: Int): Boolean {
+        val currentList = _folders.value
+        if (fromIndex !in currentList.indices || toIndex !in currentList.indices || fromIndex == toIndex) {
+            return false
+        }
+        val mutable = currentList.toMutableList()
+        val moved = mutable.removeAt(fromIndex)
+        mutable.add(toIndex, moved)
+        _folders.value = mutable
         saveAllSettings()
         return true
     }

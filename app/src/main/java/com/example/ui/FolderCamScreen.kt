@@ -775,6 +775,9 @@ fun FolderCamScreen(
             onDeleteFolder = { folderId ->
                 viewModel.deleteFolder(folderId)
             },
+            onMoveFolder = { fromIndex, toIndex ->
+                viewModel.moveFolder(fromIndex, toIndex)
+            },
             onListSdcardDirs = { path ->
                 viewModel.listSdcardDirectories(path)
             },

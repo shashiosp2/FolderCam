@@ -228,6 +228,10 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    fun moveFolder(fromIndex: Int, toIndex: Int) {
+        folderRepository.moveFolder(fromIndex, toIndex)
+    }
+
     fun listSdcardDirectories(currentSdcardPath: String): List<String> {
         return mediaStorageManager.listSdcardDirectories(currentSdcardPath)
     }

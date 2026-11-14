@@ -248,4 +248,37 @@ class ExampleRobolectricTest {
         assertEquals(Surface.ROTATION_180, CameraManager.mapSensorOrientationToSurfaceRotation(180))
         assertEquals(Surface.ROTATION_90, CameraManager.mapSensorOrientationToSurfaceRotation(270))
     }
+
+    @Test
+    fun `moveFolder reorders folders preserves active selection and persists to foldercam json`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        context.getSharedPreferences("folder_cam_v2_prefs", Context.MODE_PRIVATE)
+            .edit().clear().commit()
+        FolderRepository(context).getFallbackConfigFile().delete()
+        FolderRepository(context).getSdcardConfigFile().delete()
+
+        val repo = FolderRepository(context)
+        val alpha = repo.addFolder("Alpha", "/sdcard/DCIM/Alpha")
+        val beta = repo.addFolder("Beta", "/sdcard/DCIM/Beta")
+        val gamma = repo.addFolder("Gamma", "/sdcard/DCIM/Gamma")
+        repo.selectFolder(beta.id)
+
+        assertEquals(listOf("Alpha", "Beta", "Gamma"), repo.folders.value.map { it.name })
+        assertTrue(repo.moveFolder(2, 0))
+        assertEquals(listOf("Gamma", "Alpha", "Beta"), repo.folders.value.map { it.name })
+        assertEquals(beta.id, repo.selectedFolderId.value)
+
+        // Verify persisted order survives restore/reload
+        val exported = repo.toJsonString()
+        val repoReloaded = FolderRepository(context)
+        assertTrue(repoReloaded.restoreFromJsonString(exported))
+        assertEquals(listOf("Gamma", "Alpha", "Beta"), repoReloaded.folders.value.map { it.name })
+        assertEquals(beta.id, repoReloaded.selectedFolderId.value)
+        assertFalse(repo.moveFolder(-1, 0))
+        assertFalse(repo.moveFolder(1, 1))
+
+        // Clean up
+        repo.getFallbackConfigFile().delete()
+        repo.getSdcardConfigFile().delete()
+    }
 }

@@ -7,6 +7,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,10 +25,13 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.Folder
@@ -55,17 +59,28 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import com.example.data.FolderRepository
 import com.example.model.MediaFolder
 
@@ -84,6 +99,7 @@ fun FolderSettingsDialog(
     onAddFolder: (name: String, sdcardPath: String, treeUri: String?) -> Unit,
     onUpdateFolder: (folderId: String, name: String, sdcardPath: String, treeUri: String?) -> Unit,
     onDeleteFolder: (folderId: String) -> Unit,
+    onMoveFolder: (fromIndex: Int, toIndex: Int) -> Unit,
     onListSdcardDirs: (String) -> List<String>,
     onCreateSdcardDir: (String, String) -> String,
     onResolveTreeUri: (Uri) -> String,
@@ -91,6 +107,8 @@ fun FolderSettingsDialog(
 ) {
     val colorScheme = MaterialTheme.colorScheme
     val context = LocalContext.current
+    val density = LocalDensity.current
+    val hapticFeedback = LocalHapticFeedback.current
     val requiresAtLeastOneFolder = folders.isEmpty()
 
     var isEditingOrAdding by remember(requiresAtLeastOneFolder) {
@@ -102,6 +120,10 @@ fun FolderSettingsDialog(
     var selectedTreeUri by remember { mutableStateOf<String?>(null) }
     var showSdcardBrowser by remember { mutableStateOf(false) }
     var validationError by remember { mutableStateOf<String?>(null) }
+    var draggingFolderId by remember { mutableStateOf<String?>(null) }
+    var dragOffsetY by remember { mutableFloatStateOf(0f) }
+    val itemHeights = remember { mutableStateMapOf<String, Float>() }
+    val latestFolders by rememberUpdatedState(folders)
 
     val documentTreeLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
@@ -174,7 +196,7 @@ fun FolderSettingsDialog(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .verticalScroll(rememberScrollState()),
+                    .verticalScroll(rememberScrollState(), enabled = draggingFolderId == null),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 // Theme Toggle Row (Material 3)
@@ -539,113 +561,275 @@ fun FolderSettingsDialog(
                     }
                 }
 
-                // Existing Folders List
+                // Existing Folders List (supports drag-and-drop & up/down reordering)
                 if (folders.isNotEmpty()) {
                     HorizontalDivider()
-                    Text(
-                        text = "Configured Folders (${folders.size})",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = colorScheme.onSurfaceVariant
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Configured Folders (${folders.size})",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = colorScheme.onSurfaceVariant
+                            )
+                            if (folders.size > 1) {
+                                Text(
+                                    text = "Drag handle or use arrows to reorder bottom bar",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+                                )
+                            }
+                        }
+                    }
 
+                    val itemSpacingPx = with(density) { 8.dp.toPx() }
                     Column(
                         modifier = Modifier.fillMaxWidth(),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        folders.forEach { folder ->
-                            val isSelected = folder.id == selectedFolderId
-                            val count = folderCounts[folder.id] ?: 0
+                        folders.forEachIndexed { index, folder ->
+                            key(folder.id) {
+                                val isSelected = folder.id == selectedFolderId
+                                val isDragging = draggingFolderId == folder.id
+                                val count = folderCounts[folder.id] ?: 0
+                                val canMoveUp = index > 0
+                                val canMoveDown = index < folders.lastIndex
 
-                            OutlinedCard(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { onSelectFolder(folder) },
-                                border = BorderStroke(
-                                    width = if (isSelected) 2.dp else 1.dp,
-                                    color = if (isSelected) colorScheme.primary else colorScheme.outlineVariant
-                                )
-                            ) {
-                                ListItem(
-                                    headlineContent = {
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Text(
-                                                text = folder.name,
-                                                style = MaterialTheme.typography.titleSmall,
-                                                fontWeight = FontWeight.Bold,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                            if (isSelected) {
-                                                Spacer(modifier = Modifier.width(8.dp))
-                                                Badge(
-                                                    containerColor = colorScheme.primaryContainer,
-                                                    contentColor = colorScheme.onPrimaryContainer
-                                                ) {
-                                                    Text("Active")
-                                                }
+                                OutlinedCard(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .zIndex(if (isDragging) 1f else 0f)
+                                        .onSizeChanged { size ->
+                                            itemHeights[folder.id] = size.height.toFloat()
+                                        }
+                                        .graphicsLayer {
+                                            if (isDragging) {
+                                                translationY = dragOffsetY
+                                                scaleX = 1.02f
+                                                scaleY = 1.02f
                                             }
                                         }
-                                    },
-                                    supportingContent = {
-                                        Column {
-                                            Text(
-                                                text = folder.sdcardPath,
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = colorScheme.primary,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                            Text(
-                                                text = "$count saved item(s)",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = colorScheme.onSurfaceVariant
-                                            )
-                                        }
-                                    },
-                                    leadingContent = {
-                                        Icon(
-                                            imageVector = Icons.Default.Folder,
-                                            contentDescription = null,
-                                            tint = if (isSelected) colorScheme.primary else colorScheme.onSurfaceVariant
-                                        )
-                                    },
-                                    trailingContent = {
-                                        Row {
-                                            IconButton(
-                                                onClick = {
-                                                    editingFolderId = folder.id
-                                                    folderName = folder.name
-                                                    sdcardLocation = folder.sdcardPath
-                                                    selectedTreeUri = folder.treeUri
-                                                    isEditingOrAdding = true
-                                                }
-                                            ) {
-                                                Icon(
-                                                    imageVector = Icons.Default.Edit,
-                                                    contentDescription = "Edit Folder",
-                                                    modifier = Modifier.size(18.dp)
-                                                )
-                                            }
-                                            IconButton(
-                                                onClick = { onDeleteFolder(folder.id) }
-                                            ) {
-                                                Icon(
-                                                    imageVector = Icons.Default.DeleteOutline,
-                                                    contentDescription = "Delete Folder",
-                                                    tint = colorScheme.error,
-                                                    modifier = Modifier.size(18.dp)
-                                                )
-                                            }
-                                        }
-                                    },
-                                    colors = ListItemDefaults.colors(
-                                        containerColor = if (isSelected) {
-                                            colorScheme.primaryContainer.copy(alpha = 0.25f)
-                                        } else {
-                                            colorScheme.surface
+                                        .clickable { onSelectFolder(folder) },
+                                    border = BorderStroke(
+                                        width = when {
+                                            isDragging -> 2.dp
+                                            isSelected -> 2.dp
+                                            else -> 1.dp
+                                        },
+                                        color = when {
+                                            isDragging -> colorScheme.tertiary
+                                            isSelected -> colorScheme.primary
+                                            else -> colorScheme.outlineVariant
                                         }
                                     )
-                                )
+                                ) {
+                                    Column {
+                                        ListItem(
+                                            headlineContent = {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    if (folders.size > 1) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.Folder,
+                                                            contentDescription = null,
+                                                            tint = if (isSelected) colorScheme.primary else colorScheme.onSurfaceVariant,
+                                                            modifier = Modifier.size(16.dp)
+                                                        )
+                                                        Spacer(modifier = Modifier.width(6.dp))
+                                                    }
+                                                    Text(
+                                                        text = folder.name,
+                                                        style = MaterialTheme.typography.titleSmall,
+                                                        fontWeight = FontWeight.Bold,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis,
+                                                        modifier = Modifier.weight(1f, fill = false)
+                                                    )
+                                                    if (isSelected) {
+                                                        Spacer(modifier = Modifier.width(8.dp))
+                                                        Badge(
+                                                            containerColor = colorScheme.primaryContainer,
+                                                            contentColor = colorScheme.onPrimaryContainer
+                                                        ) {
+                                                            Text("Active")
+                                                        }
+                                                    }
+                                                }
+                                            },
+                                            supportingContent = {
+                                                Column {
+                                                    Text(
+                                                        text = folder.sdcardPath,
+                                                        style = MaterialTheme.typography.bodySmall,
+                                                        color = colorScheme.primary,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                    Text(
+                                                        text = "$count saved item(s)",
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = colorScheme.onSurfaceVariant
+                                                    )
+                                                }
+                                            },
+                                            leadingContent = {
+                                                if (folders.size > 1) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .size(48.dp)
+                                                            .pointerInput(folder.id) {
+                                                                detectDragGestures(
+                                                                    onDragStart = {
+                                                                        draggingFolderId = folder.id
+                                                                        dragOffsetY = 0f
+                                                                        hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                                    },
+                                                                    onDragEnd = {
+                                                                        draggingFolderId = null
+                                                                        dragOffsetY = 0f
+                                                                    },
+                                                                    onDragCancel = {
+                                                                        draggingFolderId = null
+                                                                        dragOffsetY = 0f
+                                                                    },
+                                                                    onDrag = { change, dragAmount ->
+                                                                        change.consume()
+                                                                        dragOffsetY += dragAmount.y
+                                                                        val currentList = latestFolders
+                                                                        val currentIdx = currentList.indexOfFirst { it.id == folder.id }
+                                                                        if (currentIdx == -1) return@detectDragGestures
+
+                                                                        if (dragOffsetY > 0f && currentIdx < currentList.lastIndex) {
+                                                                            val nextFolder = currentList[currentIdx + 1]
+                                                                            val stepHeight = (itemHeights[nextFolder.id] ?: 180f) + itemSpacingPx
+                                                                            if (dragOffsetY >= stepHeight * 0.5f) {
+                                                                                onMoveFolder(currentIdx, currentIdx + 1)
+                                                                                dragOffsetY -= stepHeight
+                                                                                hapticFeedback.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                                            }
+                                                                        } else if (dragOffsetY < 0f && currentIdx > 0) {
+                                                                            val prevFolder = currentList[currentIdx - 1]
+                                                                            val stepHeight = (itemHeights[prevFolder.id] ?: 180f) + itemSpacingPx
+                                                                            if (dragOffsetY <= -stepHeight * 0.5f) {
+                                                                                onMoveFolder(currentIdx, currentIdx - 1)
+                                                                                dragOffsetY += stepHeight
+                                                                                hapticFeedback.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                )
+                                                            }
+                                                            .testTag("drag_folder_handle_${folder.id}"),
+                                                        contentAlignment = Alignment.Center
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.DragHandle,
+                                                            contentDescription = "Drag to reorder ${folder.name}",
+                                                            tint = if (isDragging) colorScheme.tertiary else colorScheme.onSurfaceVariant
+                                                        )
+                                                    }
+                                                } else {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Folder,
+                                                        contentDescription = null,
+                                                        tint = if (isSelected) colorScheme.primary else colorScheme.onSurfaceVariant
+                                                    )
+                                                }
+                                            },
+                                            trailingContent = {
+                                                Row {
+                                                    IconButton(
+                                                        onClick = {
+                                                            editingFolderId = folder.id
+                                                            folderName = folder.name
+                                                            sdcardLocation = folder.sdcardPath
+                                                            selectedTreeUri = folder.treeUri
+                                                            isEditingOrAdding = true
+                                                        }
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.Edit,
+                                                            contentDescription = "Edit Folder",
+                                                            modifier = Modifier.size(18.dp)
+                                                        )
+                                                    }
+                                                    IconButton(
+                                                        onClick = { onDeleteFolder(folder.id) }
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.DeleteOutline,
+                                                            contentDescription = "Delete Folder",
+                                                            tint = colorScheme.error,
+                                                            modifier = Modifier.size(18.dp)
+                                                        )
+                                                    }
+                                                }
+                                            },
+                                            colors = ListItemDefaults.colors(
+                                                containerColor = when {
+                                                    isDragging -> colorScheme.tertiaryContainer.copy(alpha = 0.35f)
+                                                    isSelected -> colorScheme.primaryContainer.copy(alpha = 0.25f)
+                                                    else -> colorScheme.surface
+                                                }
+                                            )
+                                        )
+
+                                        if (folders.size > 1) {
+                                            HorizontalDivider(
+                                                color = colorScheme.outlineVariant.copy(alpha = 0.6f)
+                                            )
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(horizontal = 12.dp, vertical = 2.dp),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Text(
+                                                    text = "Position #${index + 1}",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = colorScheme.onSurfaceVariant
+                                                )
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    IconButton(
+                                                        onClick = {
+                                                            if (canMoveUp) {
+                                                                hapticFeedback.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                                onMoveFolder(index, index - 1)
+                                                            }
+                                                        },
+                                                        enabled = canMoveUp,
+                                                        modifier = Modifier.testTag("move_folder_up_${folder.id}")
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.ArrowUpward,
+                                                            contentDescription = "Move ${folder.name} up",
+                                                            modifier = Modifier.size(18.dp)
+                                                        )
+                                                    }
+                                                    IconButton(
+                                                        onClick = {
+                                                            if (canMoveDown) {
+                                                                hapticFeedback.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                                onMoveFolder(index, index + 1)
+                                                            }
+                                                        },
+                                                        enabled = canMoveDown,
+                                                        modifier = Modifier.testTag("move_folder_down_${folder.id}")
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.ArrowDownward,
+                                                            contentDescription = "Move ${folder.name} down",
+                                                            modifier = Modifier.size(18.dp)
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
