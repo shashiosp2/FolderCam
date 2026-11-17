@@ -14,8 +14,10 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
@@ -270,99 +272,130 @@ fun FolderCamScreen(
         modifier = modifier.fillMaxSize(),
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
-            TopAppBar(
-                title = {
-                    Text(
-                        text = "FolderCam",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                },
-                actions = {
-                    // Only show camera flash & flip when in Photo or Video mode
-                    if (recorderMode != RecorderMode.AUDIO) {
-                        FilledTonalIconButton(
-                            onClick = {
-                                isFlashOn = !isFlashOn
-                                cameraManager.toggleTorch(isFlashOn)
-                            },
-                            modifier = Modifier
-                                .padding(end = 4.dp)
-                                .testTag("flash_toggle_button")
-                        ) {
-                            Icon(
-                                imageVector = if (isFlashOn) Icons.Default.FlashOn else Icons.Default.FlashOff,
-                                contentDescription = "Toggle Flash"
-                            )
-                        }
-
-                        FilledTonalIconButton(
-                            onClick = {
-                                previewViewRef?.let { cameraManager.switchCamera(it) }
-                            },
-                            modifier = Modifier
-                                .padding(end = 4.dp)
-                                .testTag("switch_camera_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.FlipCameraAndroid,
-                                contentDescription = "Switch Camera"
-                            )
-                        }
-                    }
-
-                    // Light / Dark Mode Toggle Button
-                    FilledTonalIconButton(
-                        onClick = { viewModel.toggleDarkTheme() },
-                        modifier = Modifier
-                            .padding(end = 4.dp)
-                            .testTag("theme_toggle_button")
-                    ) {
-                        Icon(
-                            imageVector = if (isDarkTheme) Icons.Default.LightMode else Icons.Default.DarkMode,
-                            contentDescription = if (isDarkTheme) "Switch to Light Mode" else "Switch to Dark Mode"
+            Column(modifier = Modifier.fillMaxWidth()) {
+                TopAppBar(
+                    title = {
+                        Text(
+                            text = "FolderCam",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
                         )
-                    }
-
-                    // Gallery Icon Button with M3 Badge
-                    val mediaCount = currentFolderMedia.size
-                    FilledTonalIconButton(
-                        onClick = { viewModel.openGallery() },
-                        modifier = Modifier
-                            .padding(end = 4.dp)
-                            .testTag("gallery_button")
-                    ) {
-                        BadgedBox(
-                            badge = {
-                                if (mediaCount > 0) {
-                                    Badge { Text("$mediaCount") }
-                                }
+                    },
+                    actions = {
+                        // Only show camera flash & flip when in Photo or Video mode
+                        if (recorderMode != RecorderMode.AUDIO) {
+                            FilledTonalIconButton(
+                                onClick = {
+                                    isFlashOn = !isFlashOn
+                                    cameraManager.toggleTorch(isFlashOn)
+                                },
+                                modifier = Modifier
+                                    .padding(end = 4.dp)
+                                    .testTag("flash_toggle_button")
+                            ) {
+                                Icon(
+                                    imageVector = if (isFlashOn) Icons.Default.FlashOn else Icons.Default.FlashOff,
+                                    contentDescription = "Toggle Flash"
+                                )
                             }
+
+                            FilledTonalIconButton(
+                                onClick = {
+                                    previewViewRef?.let { cameraManager.switchCamera(it) }
+                                },
+                                modifier = Modifier
+                                    .padding(end = 4.dp)
+                                    .testTag("switch_camera_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.FlipCameraAndroid,
+                                    contentDescription = "Switch Camera"
+                                )
+                            }
+                        }
+
+                        // Light / Dark Mode Toggle Button
+                        FilledTonalIconButton(
+                            onClick = { viewModel.toggleDarkTheme() },
+                            modifier = Modifier
+                                .padding(end = 4.dp)
+                                .testTag("theme_toggle_button")
                         ) {
                             Icon(
-                                imageVector = Icons.Default.PhotoLibrary,
-                                contentDescription = "Gallery"
+                                imageVector = if (isDarkTheme) Icons.Default.LightMode else Icons.Default.DarkMode,
+                                contentDescription = if (isDarkTheme) "Switch to Light Mode" else "Switch to Dark Mode"
+                            )
+                        }
+
+                        // Gallery Icon Button with M3 Badge
+                        val mediaCount = currentFolderMedia.size
+                        FilledTonalIconButton(
+                            onClick = { viewModel.openGallery() },
+                            modifier = Modifier
+                                .padding(end = 4.dp)
+                                .testTag("gallery_button")
+                        ) {
+                            BadgedBox(
+                                badge = {
+                                    if (mediaCount > 0) {
+                                        Badge { Text("$mediaCount") }
+                                    }
+                                }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.PhotoLibrary,
+                                    contentDescription = "Gallery"
+                                )
+                            }
+                        }
+
+                        // Folder Settings Icon Button
+                        FilledTonalIconButton(
+                            onClick = { viewModel.openSettings() },
+                            modifier = Modifier
+                                .padding(end = 8.dp)
+                                .testTag("settings_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Settings,
+                                contentDescription = "Folder Settings"
+                            )
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = colorScheme.surface.copy(alpha = 0.85f)
+                    )
+                )
+
+                // Docked above the viewfinder (inside Scaffold topBar) so it never blocks camera preview
+                AnimatedVisibility(
+                    visible = recorderMode != RecorderMode.AUDIO &&
+                        captureState != CaptureState.RECORDING_AUDIO,
+                    enter = expandVertically(expandFrom = Alignment.Top) + fadeIn(),
+                    exit = shrinkVertically(shrinkTowards = Alignment.Top) + fadeOut()
+                ) {
+                    Surface(
+                        color = colorScheme.surface.copy(alpha = 0.85f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 6.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            OrientationTopBar(
+                                selectedOrientation = captureOrientation,
+                                detectedAutoRotation = cameraUiState.detectedAutoRotation,
+                                isLocked = captureState == CaptureState.RECORDING_VIDEO,
+                                onSelectOrientation = { orientation ->
+                                    viewModel.setCaptureOrientation(orientation)
+                                }
                             )
                         }
                     }
-
-                    // Folder Settings Icon Button
-                    FilledTonalIconButton(
-                        onClick = { viewModel.openSettings() },
-                        modifier = Modifier
-                            .padding(end = 8.dp)
-                            .testTag("settings_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Settings,
-                            contentDescription = "Folder Settings"
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = colorScheme.surface.copy(alpha = 0.85f)
-                )
-            )
+                }
+            }
         },
         bottomBar = {
             DualBottomBars(
@@ -583,31 +616,15 @@ fun FolderCamScreen(
                 )
             }
 
-            // Top Overlays Column: Orientation selector bar (Photo & Video only) + Burst Pill + Toast + All Files Banner
+            // Top Overlays Column: Burst Pill + Toast + All Files Banner
             Column(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
                     .fillMaxWidth()
-                    .padding(top = 10.dp, start = 12.dp, end = 12.dp),
+                    .padding(top = 12.dp, start = 16.dp, end = 16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                AnimatedVisibility(
-                    visible = recorderMode != RecorderMode.AUDIO &&
-                        captureState != CaptureState.RECORDING_AUDIO,
-                    enter = fadeIn() + slideInVertically(initialOffsetY = { -it }),
-                    exit = fadeOut() + slideOutVertically(targetOffsetY = { -it })
-                ) {
-                    OrientationTopBar(
-                        selectedOrientation = captureOrientation,
-                        detectedAutoRotation = cameraUiState.detectedAutoRotation,
-                        isLocked = captureState == CaptureState.RECORDING_VIDEO,
-                        onSelectOrientation = { orientation ->
-                            viewModel.setCaptureOrientation(orientation)
-                        }
-                    )
-                }
-
                 // Live Photo / Burst Capture Counter Pill (updates immediately on every shot & tracks saving queue)
                 AnimatedVisibility(
                     visible = photoFeedback.isVisible && photoFeedback.triggerCounter > 0,
