@@ -27,6 +27,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.DarkMode
@@ -37,8 +38,10 @@ import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.LightMode
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.SdStorage
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
@@ -70,6 +73,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
@@ -83,6 +87,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import com.example.data.FolderRepository
 import com.example.model.MediaFolder
+import com.example.model.MediaType
 
 @Composable
 fun FolderSettingsDialog(
@@ -96,8 +101,31 @@ fun FolderSettingsDialog(
     onRestoreFromSdcardFile: () -> Unit,
     onRestoreFromJsonContent: (String) -> Unit,
     onSelectFolder: (MediaFolder) -> Unit,
-    onAddFolder: (name: String, sdcardPath: String, treeUri: String?) -> Unit,
-    onUpdateFolder: (folderId: String, name: String, sdcardPath: String, treeUri: String?) -> Unit,
+    onAddFolder: (
+        name: String,
+        audioSdcardPath: String,
+        photoSdcardPath: String,
+        videoSdcardPath: String,
+        audioTreeUri: String?,
+        photoTreeUri: String?,
+        videoTreeUri: String?
+    ) -> Unit,
+    onUpdateFolder: (
+        folderId: String,
+        name: String,
+        audioSdcardPath: String,
+        photoSdcardPath: String,
+        videoSdcardPath: String,
+        audioTreeUri: String?,
+        photoTreeUri: String?,
+        videoTreeUri: String?
+    ) -> Unit,
+    onUpdateFolderMediaPath: (
+        folderId: String,
+        mediaType: MediaType,
+        sdcardPath: String,
+        treeUri: String?
+    ) -> Unit,
     onDeleteFolder: (folderId: String) -> Unit,
     onMoveFolder: (fromIndex: Int, toIndex: Int) -> Unit,
     onListSdcardDirs: (String) -> List<String>,
@@ -116,8 +144,18 @@ fun FolderSettingsDialog(
     }
     var editingFolderId by remember { mutableStateOf<String?>(null) }
     var folderName by remember { mutableStateOf("") }
-    var sdcardLocation by remember { mutableStateOf("/sdcard/") }
-    var selectedTreeUri by remember { mutableStateOf<String?>(null) }
+    var audioLocation by remember { mutableStateOf("/sdcard/") }
+    var photoLocation by remember { mutableStateOf("/sdcard/") }
+    var videoLocation by remember { mutableStateOf("/sdcard/") }
+    var audioTreeUri by remember { mutableStateOf<String?>(null) }
+    var photoTreeUri by remember { mutableStateOf<String?>(null) }
+    var videoTreeUri by remember { mutableStateOf<String?>(null) }
+    var audioPathCustomized by remember { mutableStateOf(false) }
+    var photoPathCustomized by remember { mutableStateOf(false) }
+    var videoPathCustomized by remember { mutableStateOf(false) }
+
+    var pickingMediaType by remember { mutableStateOf<MediaType?>(null) }
+    var inlineTargetFolderId by remember { mutableStateOf<String?>(null) }
     var showSdcardBrowser by remember { mutableStateOf(false) }
     var validationError by remember { mutableStateOf<String?>(null) }
     var draggingFolderId by remember { mutableStateOf<String?>(null) }
@@ -128,6 +166,11 @@ fun FolderSettingsDialog(
     val documentTreeLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
     ) { uri: Uri? ->
+        val targetType = pickingMediaType ?: MediaType.PHOTO
+        val inlineFolderId = inlineTargetFolderId
+        pickingMediaType = null
+        inlineTargetFolderId = null
+
         if (uri != null) {
             try {
                 context.contentResolver.takePersistableUriPermission(
@@ -137,14 +180,33 @@ fun FolderSettingsDialog(
             } catch (e: Exception) {
                 // Ignore if persistable permission not supported
             }
-            selectedTreeUri = uri.toString()
             val resolvedPath = onResolveTreeUri(uri)
-            sdcardLocation = resolvedPath
-            if (folderName.isBlank()) {
-                val suggestedName = resolvedPath.substringAfterLast('/').ifEmpty { "MyFolder" }
-                folderName = suggestedName
+            if (inlineFolderId != null) {
+                onUpdateFolderMediaPath(inlineFolderId, targetType, resolvedPath, uri.toString())
+            } else {
+                when (targetType) {
+                    MediaType.AUDIO -> {
+                        audioLocation = resolvedPath
+                        audioTreeUri = uri.toString()
+                        audioPathCustomized = true
+                    }
+                    MediaType.PHOTO -> {
+                        photoLocation = resolvedPath
+                        photoTreeUri = uri.toString()
+                        photoPathCustomized = true
+                    }
+                    MediaType.VIDEO -> {
+                        videoLocation = resolvedPath
+                        videoTreeUri = uri.toString()
+                        videoPathCustomized = true
+                    }
+                }
+                if (folderName.isBlank()) {
+                    val suggestedName = resolvedPath.substringAfterLast('/').ifEmpty { "MyFolder" }
+                    folderName = suggestedName
+                }
+                validationError = null
             }
-            validationError = null
         }
     }
 
@@ -386,6 +448,86 @@ fun FolderSettingsDialog(
                     }
                 }
 
+                // Quick Per-Media-Type Folder Configuration for the currently active folder
+                val activeFolder = folders.find { it.id == selectedFolderId } ?: folders.firstOrNull()
+                if (activeFolder != null && !isEditingOrAdding) {
+                    OutlinedCard(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("active_media_folders_card"),
+                        shape = MaterialTheme.shapes.large,
+                        border = BorderStroke(1.dp, colorScheme.primary.copy(alpha = 0.6f))
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = "Folders by Media Type (${activeFolder.name})",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = colorScheme.primary
+                            )
+                            Text(
+                                text = "Configure separate /sdcard folders for Audio, Photos, and Videos.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colorScheme.onSurfaceVariant
+                            )
+
+                            ActiveMediaFolderRow(
+                                label = "Audio",
+                                path = activeFolder.pathFor(MediaType.AUDIO),
+                                icon = Icons.Default.Mic,
+                                browseTag = "configure_active_audio_folder",
+                                onBrowseClick = {
+                                    inlineTargetFolderId = activeFolder.id
+                                    pickingMediaType = MediaType.AUDIO
+                                    showSdcardBrowser = true
+                                },
+                                onSystemPickerClick = {
+                                    inlineTargetFolderId = activeFolder.id
+                                    pickingMediaType = MediaType.AUDIO
+                                    documentTreeLauncher.launch(null)
+                                }
+                            )
+
+                            ActiveMediaFolderRow(
+                                label = "Photos",
+                                path = activeFolder.pathFor(MediaType.PHOTO),
+                                icon = Icons.Default.CameraAlt,
+                                browseTag = "configure_active_photo_folder",
+                                onBrowseClick = {
+                                    inlineTargetFolderId = activeFolder.id
+                                    pickingMediaType = MediaType.PHOTO
+                                    showSdcardBrowser = true
+                                },
+                                onSystemPickerClick = {
+                                    inlineTargetFolderId = activeFolder.id
+                                    pickingMediaType = MediaType.PHOTO
+                                    documentTreeLauncher.launch(null)
+                                }
+                            )
+
+                            ActiveMediaFolderRow(
+                                label = "Videos",
+                                path = activeFolder.pathFor(MediaType.VIDEO),
+                                icon = Icons.Default.Videocam,
+                                browseTag = "configure_active_video_folder",
+                                onBrowseClick = {
+                                    inlineTargetFolderId = activeFolder.id
+                                    pickingMediaType = MediaType.VIDEO
+                                    showSdcardBrowser = true
+                                },
+                                onSystemPickerClick = {
+                                    inlineTargetFolderId = activeFolder.id
+                                    pickingMediaType = MediaType.VIDEO
+                                    documentTreeLauncher.launch(null)
+                                }
+                            )
+                        }
+                    }
+                }
+
                 // Add / Edit Folder Form
                 if (isEditingOrAdding) {
                     OutlinedCard(
@@ -398,7 +540,7 @@ fun FolderSettingsDialog(
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             Text(
-                                text = if (editingFolderId != null) "Edit Folder" else "New Destination Folder",
+                                text = if (editingFolderId != null) "Edit Folder & Media Paths" else "New Folder Preset",
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold,
                                 color = colorScheme.primary
@@ -409,14 +551,14 @@ fun FolderSettingsDialog(
                                 onValueChange = {
                                     folderName = it
                                     validationError = null
-                                    if (sdcardLocation == "/sdcard/" || sdcardLocation == "/sdcard") {
-                                        val safe = it.trim().replace("[^a-zA-Z0-9_-]".toRegex(), "_")
-                                        if (safe.isNotEmpty()) {
-                                            sdcardLocation = "/sdcard/$safe"
-                                        }
+                                    val safe = it.trim().replace("[^a-zA-Z0-9_-]".toRegex(), "_")
+                                    if (safe.isNotEmpty()) {
+                                        if (!audioPathCustomized) audioLocation = "/sdcard/Recordings/$safe"
+                                        if (!photoPathCustomized) photoLocation = "/sdcard/DCIM/$safe"
+                                        if (!videoPathCustomized) videoLocation = "/sdcard/Movies/$safe"
                                     }
                                 },
-                                label = { Text("Folder Name (e.g. Work, Notes)") },
+                                label = { Text("Folder Button Name (e.g. Default, Work)") },
                                 placeholder = { Text("Enter folder button name") },
                                 singleLine = true,
                                 modifier = Modifier
@@ -424,58 +566,77 @@ fun FolderSettingsDialog(
                                     .testTag("new_folder_name_input")
                             )
 
-                            OutlinedTextField(
-                                value = sdcardLocation,
+                            MediaTypeFolderField(
+                                title = "Audio Folder (/sdcard)",
+                                placeholder = "/sdcard/Recordings/MyAudio",
+                                icon = Icons.Default.Mic,
+                                value = audioLocation,
+                                inputTestTag = "new_folder_audio_location_input",
+                                browseTestTag = "browse_audio_sdcard_button",
                                 onValueChange = {
-                                    sdcardLocation = it
+                                    audioLocation = it
+                                    audioPathCustomized = true
                                     validationError = null
                                 },
-                                label = { Text("Location on /sdcard") },
-                                placeholder = { Text("/sdcard/MyFolder") },
-                                leadingIcon = {
-                                    Icon(
-                                        imageVector = Icons.Default.FolderOpen,
-                                        contentDescription = null
-                                    )
+                                onBrowseClick = {
+                                    inlineTargetFolderId = null
+                                    pickingMediaType = MediaType.AUDIO
+                                    showSdcardBrowser = true
                                 },
-                                singleLine = true,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("new_folder_location_input")
+                                onSystemPickerClick = {
+                                    inlineTargetFolderId = null
+                                    pickingMediaType = MediaType.AUDIO
+                                    documentTreeLauncher.launch(null)
+                                }
                             )
 
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                FilledTonalButton(
-                                    onClick = { showSdcardBrowser = true },
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .testTag("browse_sdcard_button")
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.SdStorage,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text("Browse /sdcard")
+                            MediaTypeFolderField(
+                                title = "Photos Folder (/sdcard)",
+                                placeholder = "/sdcard/DCIM/MyPhotos",
+                                icon = Icons.Default.CameraAlt,
+                                value = photoLocation,
+                                inputTestTag = "new_folder_photo_location_input",
+                                browseTestTag = "browse_photo_sdcard_button",
+                                onValueChange = {
+                                    photoLocation = it
+                                    photoPathCustomized = true
+                                    validationError = null
+                                },
+                                onBrowseClick = {
+                                    inlineTargetFolderId = null
+                                    pickingMediaType = MediaType.PHOTO
+                                    showSdcardBrowser = true
+                                },
+                                onSystemPickerClick = {
+                                    inlineTargetFolderId = null
+                                    pickingMediaType = MediaType.PHOTO
+                                    documentTreeLauncher.launch(null)
                                 }
+                            )
 
-                                OutlinedButton(
-                                    onClick = { documentTreeLauncher.launch(null) },
-                                    modifier = Modifier.testTag("system_folder_picker_button")
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.FolderOpen,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text("System")
+                            MediaTypeFolderField(
+                                title = "Videos Folder (/sdcard)",
+                                placeholder = "/sdcard/Movies/MyVideos",
+                                icon = Icons.Default.Videocam,
+                                value = videoLocation,
+                                inputTestTag = "new_folder_video_location_input",
+                                browseTestTag = "browse_video_sdcard_button",
+                                onValueChange = {
+                                    videoLocation = it
+                                    videoPathCustomized = true
+                                    validationError = null
+                                },
+                                onBrowseClick = {
+                                    inlineTargetFolderId = null
+                                    pickingMediaType = MediaType.VIDEO
+                                    showSdcardBrowser = true
+                                },
+                                onSystemPickerClick = {
+                                    inlineTargetFolderId = null
+                                    pickingMediaType = MediaType.VIDEO
+                                    documentTreeLauncher.launch(null)
                                 }
-                            }
+                            )
 
                             validationError?.let { err ->
                                 Text(
@@ -505,22 +666,51 @@ fun FolderSettingsDialog(
                                 Button(
                                     onClick = {
                                         val cleanName = folderName.trim()
-                                        val cleanPath = sdcardLocation.trim()
                                         if (cleanName.isEmpty()) {
                                             validationError = "Please enter a folder name."
                                         } else {
-                                            val normalized = FolderRepository.normalizeSdcardPath(cleanPath, cleanName)
+                                            val safe = cleanName.replace("[^a-zA-Z0-9_-]".toRegex(), "_")
+                                                .ifEmpty { "Folder" }
+                                            val resolvedAudio = resolvePathOrDefault(
+                                                raw = audioLocation,
+                                                customized = audioPathCustomized,
+                                                defaultPath = "/sdcard/Recordings/$safe",
+                                                fallbackName = cleanName
+                                            )
+                                            val resolvedPhoto = resolvePathOrDefault(
+                                                raw = photoLocation,
+                                                customized = photoPathCustomized,
+                                                defaultPath = "/sdcard/DCIM/$safe",
+                                                fallbackName = cleanName
+                                            )
+                                            val resolvedVideo = resolvePathOrDefault(
+                                                raw = videoLocation,
+                                                customized = videoPathCustomized,
+                                                defaultPath = "/sdcard/Movies/$safe",
+                                                fallbackName = cleanName
+                                            )
                                             saveOrUpdate(
                                                 editingFolderId = editingFolderId,
                                                 name = cleanName,
-                                                path = normalized,
-                                                treeUri = selectedTreeUri,
+                                                audioPath = resolvedAudio,
+                                                photoPath = resolvedPhoto,
+                                                videoPath = resolvedVideo,
+                                                audioTreeUri = audioTreeUri,
+                                                photoTreeUri = photoTreeUri,
+                                                videoTreeUri = videoTreeUri,
                                                 onAddFolder = onAddFolder,
                                                 onUpdateFolder = onUpdateFolder
                                             )
                                             folderName = ""
-                                            sdcardLocation = "/sdcard/"
-                                            selectedTreeUri = null
+                                            audioLocation = "/sdcard/"
+                                            photoLocation = "/sdcard/"
+                                            videoLocation = "/sdcard/"
+                                            audioTreeUri = null
+                                            photoTreeUri = null
+                                            videoTreeUri = null
+                                            audioPathCustomized = false
+                                            photoPathCustomized = false
+                                            videoPathCustomized = false
                                             editingFolderId = null
                                             isEditingOrAdding = false
                                         }
@@ -543,8 +733,15 @@ fun FolderSettingsDialog(
                         onClick = {
                             editingFolderId = null
                             folderName = ""
-                            sdcardLocation = "/sdcard/"
-                            selectedTreeUri = null
+                            audioLocation = "/sdcard/"
+                            photoLocation = "/sdcard/"
+                            videoLocation = "/sdcard/"
+                            audioTreeUri = null
+                            photoTreeUri = null
+                            videoTreeUri = null
+                            audioPathCustomized = false
+                            photoPathCustomized = false
+                            videoPathCustomized = false
                             isEditingOrAdding = true
                         },
                         modifier = Modifier
@@ -557,7 +754,7 @@ fun FolderSettingsDialog(
                             modifier = Modifier.size(18.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Add Folder (Name & /sdcard Location)")
+                        Text("Add Folder Preset")
                     }
                 }
 
@@ -659,14 +856,38 @@ fun FolderSettingsDialog(
                                                 }
                                             },
                                             supportingContent = {
-                                                Column {
-                                                    Text(
-                                                        text = folder.sdcardPath,
-                                                        style = MaterialTheme.typography.bodySmall,
-                                                        color = colorScheme.primary,
-                                                        maxLines = 1,
-                                                        overflow = TextOverflow.Ellipsis
-                                                    )
+                                                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                                    if (folder.hasSeparateMediaPaths()) {
+                                                        Text(
+                                                            text = "Audio: ${folder.pathFor(MediaType.AUDIO)}",
+                                                            style = MaterialTheme.typography.bodySmall,
+                                                            color = colorScheme.primary,
+                                                            maxLines = 1,
+                                                            overflow = TextOverflow.Ellipsis
+                                                        )
+                                                        Text(
+                                                            text = "Photos: ${folder.pathFor(MediaType.PHOTO)}",
+                                                            style = MaterialTheme.typography.bodySmall,
+                                                            color = colorScheme.primary,
+                                                            maxLines = 1,
+                                                            overflow = TextOverflow.Ellipsis
+                                                        )
+                                                        Text(
+                                                            text = "Videos: ${folder.pathFor(MediaType.VIDEO)}",
+                                                            style = MaterialTheme.typography.bodySmall,
+                                                            color = colorScheme.primary,
+                                                            maxLines = 1,
+                                                            overflow = TextOverflow.Ellipsis
+                                                        )
+                                                    } else {
+                                                        Text(
+                                                            text = folder.sdcardPath,
+                                                            style = MaterialTheme.typography.bodySmall,
+                                                            color = colorScheme.primary,
+                                                            maxLines = 1,
+                                                            overflow = TextOverflow.Ellipsis
+                                                        )
+                                                    }
                                                     Text(
                                                         text = "$count saved item(s)",
                                                         style = MaterialTheme.typography.labelSmall,
@@ -744,8 +965,15 @@ fun FolderSettingsDialog(
                                                         onClick = {
                                                             editingFolderId = folder.id
                                                             folderName = folder.name
-                                                            sdcardLocation = folder.sdcardPath
-                                                            selectedTreeUri = folder.treeUri
+                                                            audioLocation = folder.pathFor(MediaType.AUDIO)
+                                                            photoLocation = folder.pathFor(MediaType.PHOTO)
+                                                            videoLocation = folder.pathFor(MediaType.VIDEO)
+                                                            audioTreeUri = folder.treeUriFor(MediaType.AUDIO)
+                                                            photoTreeUri = folder.treeUriFor(MediaType.PHOTO)
+                                                            videoTreeUri = folder.treeUriFor(MediaType.VIDEO)
+                                                            audioPathCustomized = true
+                                                            photoPathCustomized = true
+                                                            videoPathCustomized = true
                                                             isEditingOrAdding = true
                                                         }
                                                     ) {
@@ -850,41 +1078,237 @@ fun FolderSettingsDialog(
 
     // Interactive /sdcard Directory Browser Modal
     if (showSdcardBrowser) {
+        val targetType = pickingMediaType ?: MediaType.PHOTO
+        val inlineFolder = inlineTargetFolderId?.let { id -> folders.find { it.id == id } }
+        val initialPath = if (inlineFolder != null) {
+            inlineFolder.pathFor(targetType)
+        } else {
+            when (targetType) {
+                MediaType.AUDIO -> audioLocation
+                MediaType.PHOTO -> photoLocation
+                MediaType.VIDEO -> videoLocation
+            }
+        }
+        val pickerTitle = when (targetType) {
+            MediaType.AUDIO -> "Select Audio Folder on /sdcard"
+            MediaType.PHOTO -> "Select Photos Folder on /sdcard"
+            MediaType.VIDEO -> "Select Videos Folder on /sdcard"
+        }
+
         SdcardFolderPickerDialog(
-            initialSdcardPath = sdcardLocation,
+            title = pickerTitle,
+            initialSdcardPath = initialPath,
             onListDirectories = onListSdcardDirs,
             onCreateDirectory = onCreateSdcardDir,
             onFolderPicked = { pickedSdcardPath ->
-                sdcardLocation = pickedSdcardPath
-                selectedTreeUri = null
-                if (folderName.isBlank() && pickedSdcardPath != "/sdcard") {
-                    folderName = pickedSdcardPath.substringAfterLast('/')
+                if (inlineFolder != null) {
+                    onUpdateFolderMediaPath(inlineFolder.id, targetType, pickedSdcardPath, null)
+                } else {
+                    when (targetType) {
+                        MediaType.AUDIO -> {
+                            audioLocation = pickedSdcardPath
+                            audioTreeUri = null
+                            audioPathCustomized = true
+                        }
+                        MediaType.PHOTO -> {
+                            photoLocation = pickedSdcardPath
+                            photoTreeUri = null
+                            photoPathCustomized = true
+                        }
+                        MediaType.VIDEO -> {
+                            videoLocation = pickedSdcardPath
+                            videoTreeUri = null
+                            videoPathCustomized = true
+                        }
+                    }
+                    if (folderName.isBlank() && pickedSdcardPath != "/sdcard") {
+                        folderName = pickedSdcardPath.substringAfterLast('/')
+                    }
                 }
                 showSdcardBrowser = false
+                pickingMediaType = null
+                inlineTargetFolderId = null
                 validationError = null
             },
-            onDismiss = { showSdcardBrowser = false }
+            onDismiss = {
+                showSdcardBrowser = false
+                pickingMediaType = null
+                inlineTargetFolderId = null
+            }
         )
     }
+}
+
+@Composable
+private fun ActiveMediaFolderRow(
+    label: String,
+    path: String,
+    icon: ImageVector,
+    browseTag: String,
+    onBrowseClick: () -> Unit,
+    onSystemPickerClick: () -> Unit
+) {
+    val colorScheme = MaterialTheme.colorScheme
+    Surface(
+        color = colorScheme.surfaceContainerLow,
+        shape = MaterialTheme.shapes.medium,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = colorScheme.primary,
+                modifier = Modifier.size(18.dp)
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = path,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colorScheme.primary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            FilledTonalButton(
+                onClick = onBrowseClick,
+                modifier = Modifier.testTag(browseTag)
+            ) {
+                Text("Browse")
+            }
+            IconButton(onClick = onSystemPickerClick) {
+                Icon(
+                    imageVector = Icons.Default.FolderOpen,
+                    contentDescription = "System picker for $label",
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun MediaTypeFolderField(
+    title: String,
+    placeholder: String,
+    icon: ImageVector,
+    value: String,
+    inputTestTag: String,
+    browseTestTag: String,
+    onValueChange: (String) -> Unit,
+    onBrowseClick: () -> Unit,
+    onSystemPickerClick: () -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        OutlinedTextField(
+            value = value,
+            onValueChange = onValueChange,
+            label = { Text(title) },
+            placeholder = { Text(placeholder) },
+            leadingIcon = {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null
+                )
+            },
+            singleLine = true,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(inputTestTag)
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            FilledTonalButton(
+                onClick = onBrowseClick,
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag(browseTestTag)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.SdStorage,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Browse /sdcard")
+            }
+            OutlinedButton(onClick = onSystemPickerClick) {
+                Icon(
+                    imageVector = Icons.Default.FolderOpen,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("System")
+            }
+        }
+    }
+}
+
+private fun resolvePathOrDefault(
+    raw: String,
+    customized: Boolean,
+    defaultPath: String,
+    fallbackName: String
+): String {
+    val trimmed = raw.trim()
+    val isBlankPlaceholder = trimmed.isEmpty() || (!customized && (trimmed == "/sdcard/" || trimmed == "/sdcard"))
+    val candidate = if (isBlankPlaceholder) defaultPath else trimmed
+    return FolderRepository.normalizeSdcardPath(candidate, fallbackName)
 }
 
 private fun saveOrUpdate(
     editingFolderId: String?,
     name: String,
-    path: String,
-    treeUri: String?,
-    onAddFolder: (String, String, String?) -> Unit,
-    onUpdateFolder: (String, String, String, String?) -> Unit
+    audioPath: String,
+    photoPath: String,
+    videoPath: String,
+    audioTreeUri: String?,
+    photoTreeUri: String?,
+    videoTreeUri: String?,
+    onAddFolder: (String, String, String, String, String?, String?, String?) -> Unit,
+    onUpdateFolder: (String, String, String, String, String, String?, String?, String?) -> Unit
 ) {
     if (editingFolderId != null) {
-        onUpdateFolder(editingFolderId, name, path, treeUri)
+        onUpdateFolder(
+            editingFolderId,
+            name,
+            audioPath,
+            photoPath,
+            videoPath,
+            audioTreeUri,
+            photoTreeUri,
+            videoTreeUri
+        )
     } else {
-        onAddFolder(name, path, treeUri)
+        onAddFolder(
+            name,
+            audioPath,
+            photoPath,
+            videoPath,
+            audioTreeUri,
+            photoTreeUri,
+            videoTreeUri
+        )
     }
 }
 
 @Composable
 fun SdcardFolderPickerDialog(
+    title: String = "Select Folder on /sdcard",
     initialSdcardPath: String,
     onListDirectories: (String) -> List<String>,
     onCreateDirectory: (String, String) -> String,
@@ -914,7 +1338,7 @@ fun SdcardFolderPickerDialog(
         },
         title = {
             Text(
-                text = "Select Folder on /sdcard",
+                text = title,
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold
             )

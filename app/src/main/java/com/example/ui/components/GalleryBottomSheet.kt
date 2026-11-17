@@ -133,7 +133,17 @@ fun GalleryBottomSheet(
                     )
                     Text(
                         text = if (selectedFolder != null) {
-                            "${selectedFolder.name} • ${selectedFolder.sdcardPath} (${filteredItems.size} items)"
+                            val activePath = when (selectedMediaTypeFilter) {
+                                MediaType.AUDIO -> selectedFolder.pathFor(MediaType.AUDIO)
+                                MediaType.PHOTO -> selectedFolder.pathFor(MediaType.PHOTO)
+                                MediaType.VIDEO -> selectedFolder.pathFor(MediaType.VIDEO)
+                                null -> if (selectedFolder.hasSeparateMediaPaths()) {
+                                    "Audio, Photos & Videos folders"
+                                } else {
+                                    selectedFolder.sdcardPath
+                                }
+                            }
+                            "${selectedFolder.name} • $activePath (${filteredItems.size} items)"
                         } else {
                             "No folder selected"
                         },

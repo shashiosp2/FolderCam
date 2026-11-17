@@ -794,19 +794,39 @@ fun FolderCamScreen(
             onSelectFolder = { folder ->
                 viewModel.selectFolder(folder)
             },
-            onAddFolder = { name, sdcardPath, treeUri ->
+            onAddFolder = { name, audioPath, photoPath, videoPath, audioTreeUri, photoTreeUri, videoTreeUri ->
                 viewModel.addFolder(
                     name = name,
-                    sdcardPath = sdcardPath,
-                    treeUri = treeUri
+                    sdcardPath = photoPath,
+                    treeUri = photoTreeUri,
+                    audioSdcardPath = audioPath,
+                    photoSdcardPath = photoPath,
+                    videoSdcardPath = videoPath,
+                    audioTreeUri = audioTreeUri,
+                    photoTreeUri = photoTreeUri,
+                    videoTreeUri = videoTreeUri
                 )
             },
-            onUpdateFolder = { folderId, name, sdcardPath, treeUri ->
+            onUpdateFolder = { folderId, name, audioPath, photoPath, videoPath, audioTreeUri, photoTreeUri, videoTreeUri ->
                 viewModel.updateFolder(
                     folderId = folderId,
                     name = name,
-                    sdcardPath = sdcardPath,
+                    sdcardPath = photoPath,
                     colorHex = "#38BDF8",
+                    treeUri = photoTreeUri,
+                    audioSdcardPath = audioPath,
+                    photoSdcardPath = photoPath,
+                    videoSdcardPath = videoPath,
+                    audioTreeUri = audioTreeUri,
+                    photoTreeUri = photoTreeUri,
+                    videoTreeUri = videoTreeUri
+                )
+            },
+            onUpdateFolderMediaPath = { folderId, mediaType, sdcardPath, treeUri ->
+                viewModel.updateFolderMediaPath(
+                    folderId = folderId,
+                    mediaType = mediaType,
+                    sdcardPath = sdcardPath,
                     treeUri = treeUri
                 )
             },

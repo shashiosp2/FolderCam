@@ -373,4 +373,113 @@ class ExampleRobolectricTest {
         assertEquals(1.0f, cameraManager.cameraState.value.currentZoomRatio, 0.001f)
         cameraManager.release()
     }
+
+    @Test
+    fun `folder repository saves restores and updates separate audio photo and video paths`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        context.getSharedPreferences("folder_cam_v2_prefs", Context.MODE_PRIVATE)
+            .edit().clear().commit()
+        FolderRepository(context).getFallbackConfigFile().delete()
+        FolderRepository(context).getSdcardConfigFile().delete()
+
+        val repo = FolderRepository(context)
+        val created = repo.addFolder(
+            name = "FieldKit",
+            sdcardPath = "/sdcard/DCIM/FieldKit",
+            audioSdcardPath = "/sdcard/Recordings/FieldAudio",
+            photoSdcardPath = "/sdcard/DCIM/FieldPhotos",
+            videoSdcardPath = "/sdcard/Movies/FieldVideos"
+        )
+
+        assertTrue(created.hasSeparateMediaPaths())
+        assertEquals("/sdcard/Recordings/FieldAudio", created.pathFor(MediaType.AUDIO))
+        assertEquals("/sdcard/DCIM/FieldPhotos", created.pathFor(MediaType.PHOTO))
+        assertEquals("/sdcard/Movies/FieldVideos", created.pathFor(MediaType.VIDEO))
+
+        // Export and restore JSON
+        val exportedJson = repo.toJsonString()
+        assertTrue(exportedJson.contains("/sdcard/Recordings/FieldAudio"))
+        assertTrue(exportedJson.contains("/sdcard/DCIM/FieldPhotos"))
+        assertTrue(exportedJson.contains("/sdcard/Movies/FieldVideos"))
+
+        repo.deleteFolder(created.id)
+        assertTrue(repo.restoreFromJsonString(exportedJson))
+        val restored = repo.folders.value.first()
+        assertEquals("/sdcard/Recordings/FieldAudio", restored.pathFor(MediaType.AUDIO))
+        assertEquals("/sdcard/DCIM/FieldPhotos", restored.pathFor(MediaType.PHOTO))
+        assertEquals("/sdcard/Movies/FieldVideos", restored.pathFor(MediaType.VIDEO))
+
+        // Updating a single media type leaves other media paths intact
+        repo.updateFolderMediaPath(
+            folderId = restored.id,
+            mediaType = MediaType.AUDIO,
+            sdcardPath = "/sdcard/Music/CustomVoice",
+            treeUri = null
+        )
+        val updated = repo.folders.value.first()
+        assertEquals("/sdcard/Music/CustomVoice", updated.pathFor(MediaType.AUDIO))
+        assertEquals("/sdcard/DCIM/FieldPhotos", updated.pathFor(MediaType.PHOTO))
+        assertEquals("/sdcard/Movies/FieldVideos", updated.pathFor(MediaType.VIDEO))
+
+        // Legacy single-path JSON falls back cleanly for all 3 media types
+        val legacyJson = """{"folders":[{"id":"legacy1","name":"Legacy","sdcardPath":"/sdcard/DCIM/Legacy"}],"selectedFolderId":"legacy1"}"""
+        assertTrue(repo.restoreFromJsonString(legacyJson))
+        val legacy = repo.folders.value.first()
+        assertFalse(legacy.hasSeparateMediaPaths())
+        assertEquals("/sdcard/DCIM/Legacy", legacy.pathFor(MediaType.AUDIO))
+        assertEquals("/sdcard/DCIM/Legacy", legacy.pathFor(MediaType.PHOTO))
+        assertEquals("/sdcard/DCIM/Legacy", legacy.pathFor(MediaType.VIDEO))
+
+        repo.getFallbackConfigFile().delete()
+        repo.getSdcardConfigFile().delete()
+    }
+
+    @Test
+    fun `media storage routes audio photo and video into three separate folders and aggregates counts`() {
+        runBlocking {
+            val context = ApplicationProvider.getApplicationContext<Context>()
+            val storage = MediaStorageManager(context)
+            val separateFolder = MediaFolder(
+                id = "sep_test",
+                name = "SeparateMedia",
+                sdcardPath = "/sdcard/DCIM/SepPhotosTest",
+                audioSdcardPath = "/sdcard/Recordings/SepAudioTest",
+                photoSdcardPath = "/sdcard/DCIM/SepPhotosTest",
+                videoSdcardPath = "/sdcard/Movies/SepVideosTest"
+            )
+
+            val audioOut = storage.prepareOutputFile(separateFolder, MediaType.AUDIO)
+            audioOut.parentFile?.mkdirs()
+            audioOut.writeBytes(byteArrayOf(1, 2, 3))
+            val audioRes = storage.finalizeCapturedFile(separateFolder, audioOut, MediaType.AUDIO)
+            assertEquals("/sdcard/Recordings/SepAudioTest/${audioOut.name}", audioRes.destinationPath)
+
+            val photoOut = storage.prepareOutputFile(separateFolder, MediaType.PHOTO)
+            photoOut.parentFile?.mkdirs()
+            photoOut.writeBytes(byteArrayOf(4, 5, 6))
+            val photoRes = storage.finalizeCapturedFile(separateFolder, photoOut, MediaType.PHOTO)
+            assertEquals("/sdcard/DCIM/SepPhotosTest/${photoOut.name}", photoRes.destinationPath)
+
+            val videoOut = storage.prepareOutputFile(separateFolder, MediaType.VIDEO)
+            videoOut.parentFile?.mkdirs()
+            videoOut.writeBytes(byteArrayOf(7, 8, 9))
+            val videoRes = storage.finalizeCapturedFile(separateFolder, videoOut, MediaType.VIDEO)
+            assertEquals("/sdcard/Movies/SepVideosTest/${videoOut.name}", videoRes.destinationPath)
+
+            val items = storage.getMediaItemsForFolder(separateFolder)
+            assertEquals(3, items.size)
+            assertEquals(3, storage.getFolderMediaCount(separateFolder))
+            assertTrue(items.any { it.type == MediaType.AUDIO && it.name == audioOut.name })
+            assertTrue(items.any { it.type == MediaType.PHOTO && it.name == photoOut.name })
+            assertTrue(items.any { it.type == MediaType.VIDEO && it.name == videoOut.name })
+
+            // Clean up
+            audioRes.finalFile.delete()
+            photoRes.finalFile.delete()
+            videoRes.finalFile.delete()
+            File("/sdcard/Recordings/SepAudioTest").delete()
+            File("/sdcard/DCIM/SepPhotosTest").delete()
+            File("/sdcard/Movies/SepVideosTest").delete()
+        }
+    }
 }

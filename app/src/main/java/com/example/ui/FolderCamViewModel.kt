@@ -204,15 +204,32 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
         name: String,
         sdcardPath: String,
         colorHex: String = "#38BDF8",
-        treeUri: String? = null
+        treeUri: String? = null,
+        audioSdcardPath: String = sdcardPath,
+        photoSdcardPath: String = sdcardPath,
+        videoSdcardPath: String = sdcardPath,
+        audioTreeUri: String? = treeUri,
+        photoTreeUri: String? = treeUri,
+        videoTreeUri: String? = treeUri
     ): MediaFolder {
         val created = folderRepository.addFolder(
             name = name,
             sdcardPath = sdcardPath,
             colorHex = colorHex,
-            treeUri = treeUri
+            treeUri = treeUri,
+            audioSdcardPath = audioSdcardPath,
+            photoSdcardPath = photoSdcardPath,
+            videoSdcardPath = videoSdcardPath,
+            audioTreeUri = audioTreeUri,
+            photoTreeUri = photoTreeUri,
+            videoTreeUri = videoTreeUri
         )
-        showToast("Added folder '${created.name}' -> ${created.sdcardPath}")
+        val toastTarget = if (created.hasSeparateMediaPaths()) {
+            "Audio, Photos & Videos folders"
+        } else {
+            created.sdcardPath
+        }
+        showToast("Added folder '${created.name}' -> $toastTarget")
         refreshAllFolderCounts()
         return created
     }
@@ -222,10 +239,54 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
         name: String,
         sdcardPath: String,
         colorHex: String,
+        treeUri: String? = null,
+        audioSdcardPath: String = sdcardPath,
+        photoSdcardPath: String = sdcardPath,
+        videoSdcardPath: String = sdcardPath,
+        audioTreeUri: String? = treeUri,
+        photoTreeUri: String? = treeUri,
+        videoTreeUri: String? = treeUri
+    ) {
+        folderRepository.updateFolder(
+            folderId = folderId,
+            name = name,
+            sdcardPath = sdcardPath,
+            colorHex = colorHex,
+            treeUri = treeUri,
+            audioSdcardPath = audioSdcardPath,
+            photoSdcardPath = photoSdcardPath,
+            videoSdcardPath = videoSdcardPath,
+            audioTreeUri = audioTreeUri,
+            photoTreeUri = photoTreeUri,
+            videoTreeUri = videoTreeUri
+        )
+        showToast("Updated folder '$name'")
+        refreshAllFolderCounts()
+        refreshFolderMedia()
+    }
+
+    fun updateFolderMediaPath(
+        folderId: String,
+        mediaType: MediaType,
+        sdcardPath: String,
         treeUri: String? = null
     ) {
-        folderRepository.updateFolder(folderId, name, sdcardPath, colorHex, treeUri)
-        showToast("Updated folder '$name'")
+        folderRepository.updateFolderMediaPath(
+            folderId = folderId,
+            mediaType = mediaType,
+            sdcardPath = sdcardPath,
+            treeUri = treeUri
+        )
+        val typeLabel = when (mediaType) {
+            MediaType.AUDIO -> "Audio"
+            MediaType.PHOTO -> "Photos"
+            MediaType.VIDEO -> "Videos"
+        }
+        val updatedPath = folderRepository.folders.value
+            .find { it.id == folderId }
+            ?.pathFor(mediaType)
+            ?: sdcardPath
+        showToast("Updated $typeLabel folder -> $updatedPath")
         refreshAllFolderCounts()
         refreshFolderMedia()
     }
@@ -306,7 +367,7 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
                 inFlightCounter = current.inFlightCounter + 1,
                 isBurstActive = fromBurstLoop || current.isBurstActive,
                 lastFlashTriggerId = current.lastFlashTriggerId + 1L,
-                targetFolderPath = folder.sdcardPath,
+                targetFolderPath = folder.pathFor(MediaType.PHOTO),
                 summaryMessage = null,
                 isVisible = true
             )
@@ -336,7 +397,7 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
         _photoFeedback.update { current ->
             current.copy(
                 isBurstActive = true,
-                targetFolderPath = folder.sdcardPath,
+                targetFolderPath = folder.pathFor(MediaType.PHOTO),
                 summaryMessage = null,
                 isVisible = true
             )
@@ -391,11 +452,12 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
                 if (settled) {
                     shouldRefreshAndReset = true
                 }
+                val photoTargetPath = folder.pathFor(MediaType.PHOTO)
                 val summary = if (settled) {
                     if (result.savedToPublicSdcard) {
-                        buildSavedSummary(nextSaved, folder.sdcardPath)
+                        buildSavedSummary(nextSaved, photoTargetPath)
                     } else {
-                        result.errorMessage ?: "Saved to app storage (${folder.sdcardPath})"
+                        result.errorMessage ?: "Saved to app storage ($photoTargetPath)"
                     }
                 } else {
                     null
@@ -404,7 +466,7 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
                     triggerCounter = maxOf(current.triggerCounter, nextSaved),
                     savedCounter = nextSaved,
                     inFlightCounter = nextInFlight,
-                    targetFolderPath = folder.sdcardPath,
+                    targetFolderPath = photoTargetPath,
                     summaryMessage = summary,
                     isVisible = true
                 )
@@ -476,7 +538,7 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
             context = appContext,
             recordingType = RecordingForegroundService.TYPE_VIDEO,
             folderName = folder?.name ?: "Folder",
-            sdcardPath = folder?.sdcardPath ?: "/sdcard"
+            sdcardPath = folder?.pathFor(MediaType.VIDEO) ?: "/sdcard"
         )
 
         videoTimerJob?.cancel()
@@ -496,15 +558,16 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
         RecordingForegroundService.stop(appContext)
 
         val folder = selectedFolder.value ?: return
+        val videoPath = folder.pathFor(MediaType.VIDEO)
         viewModelScope.launch {
             val result = mediaStorageManager.finalizeCapturedFile(folder, file, MediaType.VIDEO)
             if (result.savedToPublicSdcard) {
-                showToast("Video saved to ${folder.sdcardPath}")
+                showToast("Video saved to $videoPath")
             } else {
                 if (result.requiresAllFilesAccess) {
                     _needsAllFilesAccessBanner.value = true
                 }
-                showToast(result.errorMessage ?: "Saved to app storage (${folder.sdcardPath})")
+                showToast(result.errorMessage ?: "Saved to app storage ($videoPath)")
             }
             refreshFolderMedia()
             refreshAllFolderCounts()
@@ -528,8 +591,9 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
             _isSettingsOpen.value = true
             return false
         }
+        val audioPath = folder.pathFor(MediaType.AUDIO)
         val outputFile = prepareOutputFile(MediaType.AUDIO) ?: return false
-        val fallbackFile = mediaStorageManager.prepareStagingFallbackFile(folder, outputFile.name)
+        val fallbackFile = mediaStorageManager.prepareStagingFallbackFile(folder, outputFile.name, MediaType.AUDIO)
         val started = audioRecorderManager.startRecording(
             outputFile = outputFile,
             scope = viewModelScope,
@@ -541,7 +605,7 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
                 context = appContext,
                 recordingType = RecordingForegroundService.TYPE_AUDIO,
                 folderName = folder.name,
-                sdcardPath = folder.sdcardPath
+                sdcardPath = audioPath
             )
         } else {
             showToast("Failed to start audio recording")
@@ -556,15 +620,16 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
 
         val folder = selectedFolder.value
         if (file != null && file.exists() && folder != null) {
+            val audioPath = folder.pathFor(MediaType.AUDIO)
             viewModelScope.launch {
                 val result = mediaStorageManager.finalizeCapturedFile(folder, file, MediaType.AUDIO)
                 if (result.savedToPublicSdcard) {
-                    showToast("Audio saved to ${folder.sdcardPath}")
+                    showToast("Audio saved to $audioPath")
                 } else {
                     if (result.requiresAllFilesAccess) {
                         _needsAllFilesAccessBanner.value = true
                     }
-                    showToast(result.errorMessage ?: "Saved to app storage (${folder.sdcardPath})")
+                    showToast(result.errorMessage ?: "Saved to app storage ($audioPath)")
                 }
                 refreshFolderMedia()
                 refreshAllFolderCounts()

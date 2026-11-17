@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import android.os.Environment
 import com.example.model.CaptureOrientation
 import com.example.model.MediaFolder
+import com.example.model.MediaType
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -149,16 +150,31 @@ class FolderRepository(private val context: Context) {
         name: String,
         sdcardPath: String,
         colorHex: String = "#38BDF8",
-        treeUri: String? = null
+        treeUri: String? = null,
+        audioSdcardPath: String = sdcardPath,
+        photoSdcardPath: String = sdcardPath,
+        videoSdcardPath: String = sdcardPath,
+        audioTreeUri: String? = treeUri,
+        photoTreeUri: String? = treeUri,
+        videoTreeUri: String? = treeUri
     ): MediaFolder {
         val cleanName = name.trim().ifEmpty { "Folder" }
         val normalizedPath = normalizeSdcardPath(sdcardPath, cleanName)
+        val normalizedAudio = normalizeSdcardPath(audioSdcardPath, cleanName)
+        val normalizedPhoto = normalizeSdcardPath(photoSdcardPath, cleanName)
+        val normalizedVideo = normalizeSdcardPath(videoSdcardPath, cleanName)
         val id = "folder_${System.currentTimeMillis()}_${folderIdSeq.incrementAndGet()}"
         val newFolder = MediaFolder(
             id = id,
             name = cleanName,
             sdcardPath = normalizedPath,
+            audioSdcardPath = normalizedAudio,
+            photoSdcardPath = normalizedPhoto,
+            videoSdcardPath = normalizedVideo,
             treeUri = treeUri,
+            audioTreeUri = audioTreeUri,
+            photoTreeUri = photoTreeUri,
+            videoTreeUri = videoTreeUri,
             colorHex = colorHex,
             iconName = "Folder"
         )
@@ -174,23 +190,111 @@ class FolderRepository(private val context: Context) {
         name: String,
         sdcardPath: String,
         colorHex: String,
-        treeUri: String? = null
+        treeUri: String? = null,
+        audioSdcardPath: String = sdcardPath,
+        photoSdcardPath: String = sdcardPath,
+        videoSdcardPath: String = sdcardPath,
+        audioTreeUri: String? = treeUri,
+        photoTreeUri: String? = treeUri,
+        videoTreeUri: String? = treeUri
     ) {
         val cleanName = name.trim().ifEmpty { "Folder" }
         val normalizedPath = normalizeSdcardPath(sdcardPath, cleanName)
+        val normalizedAudio = normalizeSdcardPath(audioSdcardPath, cleanName)
+        val normalizedPhoto = normalizeSdcardPath(photoSdcardPath, cleanName)
+        val normalizedVideo = normalizeSdcardPath(videoSdcardPath, cleanName)
         val updatedList = _folders.value.map { existing ->
             if (existing.id == folderId) {
-                val pathChanged = existing.sdcardPath != normalizedPath
+                val baseChanged = existing.sdcardPath != normalizedPath
+                val audioChanged = existing.audioSdcardPath != normalizedAudio
+                val photoChanged = existing.photoSdcardPath != normalizedPhoto
+                val videoChanged = existing.videoSdcardPath != normalizedVideo
                 existing.copy(
                     name = cleanName,
                     sdcardPath = normalizedPath,
+                    audioSdcardPath = normalizedAudio,
+                    photoSdcardPath = normalizedPhoto,
+                    videoSdcardPath = normalizedVideo,
                     colorHex = colorHex,
                     treeUri = when {
                         treeUri != null -> treeUri
-                        pathChanged -> null
+                        baseChanged -> null
                         else -> existing.treeUri
+                    },
+                    audioTreeUri = when {
+                        audioTreeUri != null -> audioTreeUri
+                        audioChanged -> null
+                        else -> existing.audioTreeUri
+                    },
+                    photoTreeUri = when {
+                        photoTreeUri != null -> photoTreeUri
+                        photoChanged -> null
+                        else -> existing.photoTreeUri
+                    },
+                    videoTreeUri = when {
+                        videoTreeUri != null -> videoTreeUri
+                        videoChanged -> null
+                        else -> existing.videoTreeUri
                     }
                 )
+            } else {
+                existing
+            }
+        }
+        _folders.value = updatedList
+        saveAllSettings()
+    }
+
+    fun updateFolderMediaPath(
+        folderId: String,
+        mediaType: MediaType,
+        sdcardPath: String,
+        treeUri: String? = null
+    ) {
+        val updatedList = _folders.value.map { existing ->
+            if (existing.id == folderId) {
+                val normalized = normalizeSdcardPath(sdcardPath, existing.name)
+                when (mediaType) {
+                    MediaType.AUDIO -> {
+                        val changed = existing.audioSdcardPath != normalized
+                        existing.copy(
+                            audioSdcardPath = normalized,
+                            audioTreeUri = when {
+                                treeUri != null -> treeUri
+                                changed -> null
+                                else -> existing.audioTreeUri
+                            }
+                        )
+                    }
+                    MediaType.PHOTO -> {
+                        val changed = existing.photoSdcardPath != normalized
+                        existing.copy(
+                            sdcardPath = normalized,
+                            photoSdcardPath = normalized,
+                            treeUri = when {
+                                treeUri != null -> treeUri
+                                changed -> null
+                                else -> existing.treeUri
+                            },
+                            photoTreeUri = when {
+                                treeUri != null -> treeUri
+                                changed -> null
+                                else -> existing.photoTreeUri
+                            }
+                        )
+                    }
+                    MediaType.VIDEO -> {
+                        val changed = existing.videoSdcardPath != normalized
+                        existing.copy(
+                            videoSdcardPath = normalized,
+                            videoTreeUri = when {
+                                treeUri != null -> treeUri
+                                changed -> null
+                                else -> existing.videoTreeUri
+                            }
+                        )
+                    }
+                }
             } else {
                 existing
             }
@@ -318,13 +422,24 @@ class FolderRepository(private val context: Context) {
         for (i in 0 until array.length()) {
             val obj = array.getJSONObject(i)
             val name = obj.optString("name", "Folder")
-            val sdcardPath = obj.optString("sdcardPath", "/sdcard/$name")
+            val rawSdcardPath = obj.optString("sdcardPath", "/sdcard/$name")
+            val basePath = normalizeSdcardPath(rawSdcardPath, name)
+            val baseTreeUri = obj.optString("treeUri", "").ifEmpty { null }
+            val audioPath = obj.optString("audioSdcardPath", "").ifBlank { basePath }
+            val photoPath = obj.optString("photoSdcardPath", "").ifBlank { basePath }
+            val videoPath = obj.optString("videoSdcardPath", "").ifBlank { basePath }
             loadedList.add(
                 MediaFolder(
                     id = obj.optString("id", "folder_${System.currentTimeMillis()}_$i"),
                     name = name,
-                    sdcardPath = normalizeSdcardPath(sdcardPath, name),
-                    treeUri = obj.optString("treeUri", "").ifEmpty { null },
+                    sdcardPath = basePath,
+                    audioSdcardPath = normalizeSdcardPath(audioPath, name),
+                    photoSdcardPath = normalizeSdcardPath(photoPath, name),
+                    videoSdcardPath = normalizeSdcardPath(videoPath, name),
+                    treeUri = baseTreeUri,
+                    audioTreeUri = obj.optString("audioTreeUri", "").ifEmpty { baseTreeUri },
+                    photoTreeUri = obj.optString("photoTreeUri", "").ifEmpty { baseTreeUri },
+                    videoTreeUri = obj.optString("videoTreeUri", "").ifEmpty { baseTreeUri },
                     colorHex = obj.optString("colorHex", "#38BDF8"),
                     iconName = obj.optString("iconName", "Folder"),
                     createdAt = obj.optLong("createdAt", System.currentTimeMillis())
@@ -350,7 +465,13 @@ class FolderRepository(private val context: Context) {
                 put("id", item.id)
                 put("name", item.name)
                 put("sdcardPath", item.sdcardPath)
+                put("audioSdcardPath", item.audioSdcardPath)
+                put("photoSdcardPath", item.photoSdcardPath)
+                put("videoSdcardPath", item.videoSdcardPath)
                 put("treeUri", item.treeUri ?: "")
+                put("audioTreeUri", item.audioTreeUri ?: "")
+                put("photoTreeUri", item.photoTreeUri ?: "")
+                put("videoTreeUri", item.videoTreeUri ?: "")
                 put("colorHex", item.colorHex)
                 put("iconName", item.iconName)
                 put("createdAt", item.createdAt)

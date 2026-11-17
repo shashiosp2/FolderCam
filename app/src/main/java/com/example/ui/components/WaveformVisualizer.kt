@@ -45,8 +45,10 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.model.MediaFolder
+import com.example.model.MediaType
 import java.util.Locale
 
 @Composable
@@ -158,7 +160,36 @@ fun WaveformVisualizer(
                 color = colorScheme.onSurfaceVariant
             )
 
-            Spacer(modifier = Modifier.height(28.dp))
+            Spacer(modifier = Modifier.height(12.dp))
+
+            AssistChip(
+                onClick = onOpenFolderSettings,
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Default.Folder,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                },
+                label = {
+                    Text(
+                        text = targetFolder?.let {
+                            "Audio -> ${it.pathFor(MediaType.AUDIO)}"
+                        } ?: "Configure Audio Folder",
+                        style = MaterialTheme.typography.labelMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                },
+                colors = AssistChipDefaults.assistChipColors(
+                    containerColor = colorScheme.surfaceContainerHigh,
+                    labelColor = colorScheme.onSurface,
+                    leadingIconContentColor = colorScheme.primary
+                ),
+                modifier = Modifier.testTag("audio_target_folder_chip")
+            )
+
+            Spacer(modifier = Modifier.height(18.dp))
 
             // Material 3 Elevated Card for Waveform Canvas
             ElevatedCard(
