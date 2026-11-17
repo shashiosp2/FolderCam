@@ -8,6 +8,7 @@ import com.example.audio.AudioRecorderManager
 import com.example.camera.CameraManager
 import com.example.data.FolderRepository
 import com.example.data.MediaStorageManager
+import com.example.model.CaptureOrientation
 import com.example.model.CaptureState
 import com.example.model.MediaFolder
 import com.example.model.MediaItem
@@ -42,6 +43,7 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
     val folders: StateFlow<List<MediaFolder>> = folderRepository.folders
     val selectedFolderId: StateFlow<String?> = folderRepository.selectedFolderId
     val isDarkTheme: StateFlow<Boolean> = folderRepository.isDarkTheme
+    val captureOrientation: StateFlow<CaptureOrientation> = folderRepository.captureOrientation
 
     val selectedFolder: StateFlow<MediaFolder?> = combine(folders, selectedFolderId) { list, id ->
         if (list.isEmpty()) {
@@ -99,6 +101,7 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
     private var photoFeedbackResetJob: Job? = null
 
     init {
+        cameraManager.setCaptureOrientation(folderRepository.captureOrientation.value)
         RecordingServiceBridge.onStopRequested = {
             viewModelScope.launch(Dispatchers.Main.immediate) {
                 when (_captureState.value) {
@@ -127,6 +130,7 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
         if (granted) {
             _needsAllFilesAccessBanner.value = false
             folderRepository.syncWithSdcardOnResume()
+            cameraManager.setCaptureOrientation(folderRepository.captureOrientation.value)
         }
         refreshAllFolderCounts()
         refreshFolderMedia()
@@ -144,9 +148,16 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
         folderRepository.setDarkTheme(isDark)
     }
 
+    fun setCaptureOrientation(orientation: CaptureOrientation) {
+        if (_captureState.value == CaptureState.RECORDING_VIDEO) return
+        folderRepository.setCaptureOrientation(orientation)
+        cameraManager.setCaptureOrientation(orientation)
+    }
+
     fun restoreSettingsFromSdcard(): Boolean {
         val restored = folderRepository.restoreFromSdcardConfigFile()
         if (restored) {
+            cameraManager.setCaptureOrientation(folderRepository.captureOrientation.value)
             showToast("Restored settings from /sdcard/.foldercam")
             refreshAllFolderCounts()
             refreshFolderMedia()
@@ -159,6 +170,7 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
     fun restoreSettingsFromJson(jsonString: String): Boolean {
         val restored = folderRepository.restoreFromJsonString(jsonString)
         if (restored) {
+            cameraManager.setCaptureOrientation(folderRepository.captureOrientation.value)
             showToast("Settings restored and synced to /sdcard/.foldercam")
             refreshAllFolderCounts()
             refreshFolderMedia()

@@ -94,6 +94,7 @@ import com.example.model.RecorderMode
 import com.example.ui.components.DualBottomBars
 import com.example.ui.components.FolderSettingsDialog
 import com.example.ui.components.GalleryBottomSheet
+import com.example.ui.components.OrientationTopBar
 import com.example.ui.components.WaveformVisualizer
 import kotlinx.coroutines.delay
 
@@ -121,6 +122,7 @@ fun FolderCamScreen(
     val hasAllFilesAccess by viewModel.hasAllFilesAccess.collectAsState()
     val needsAllFilesAccessBanner by viewModel.needsAllFilesAccessBanner.collectAsState()
     val photoFeedback by viewModel.photoFeedback.collectAsState()
+    val captureOrientation by viewModel.captureOrientation.collectAsState()
 
     var hasCameraPermission by remember {
         mutableStateOf(
@@ -581,152 +583,171 @@ fun FolderCamScreen(
                 )
             }
 
-            // Live Photo / Burst Capture Counter Pill (updates immediately on every shot & tracks saving queue)
-            AnimatedVisibility(
-                visible = photoFeedback.isVisible && photoFeedback.triggerCounter > 0,
-                enter = fadeIn() + slideInVertically(initialOffsetY = { -it }),
-                exit = fadeOut() + slideOutVertically(targetOffsetY = { -it }),
+            // Top Overlays Column: Orientation selector bar (Photo & Video only) + Burst Pill + Toast + All Files Banner
+            Column(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
-                    .padding(top = 12.dp, start = 16.dp, end = 16.dp)
+                    .fillMaxWidth()
+                    .padding(top = 10.dp, start = 12.dp, end = 12.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                val isSummary = photoFeedback.summaryMessage != null &&
-                    !photoFeedback.isBurstActive &&
-                    photoFeedback.inFlightCounter == 0
-                val containerColor = when {
-                    isSummary -> colorScheme.inverseSurface
-                    photoFeedback.isBurstActive -> colorScheme.tertiaryContainer
-                    else -> colorScheme.primaryContainer
-                }
-                val contentColor = when {
-                    isSummary -> colorScheme.inverseOnSurface
-                    photoFeedback.isBurstActive -> colorScheme.onTertiaryContainer
-                    else -> colorScheme.onPrimaryContainer
+                AnimatedVisibility(
+                    visible = recorderMode != RecorderMode.AUDIO &&
+                        captureState != CaptureState.RECORDING_AUDIO,
+                    enter = fadeIn() + slideInVertically(initialOffsetY = { -it }),
+                    exit = fadeOut() + slideOutVertically(targetOffsetY = { -it })
+                ) {
+                    OrientationTopBar(
+                        selectedOrientation = captureOrientation,
+                        detectedAutoRotation = cameraUiState.detectedAutoRotation,
+                        isLocked = captureState == CaptureState.RECORDING_VIDEO,
+                        onSelectOrientation = { orientation ->
+                            viewModel.setCaptureOrientation(orientation)
+                        }
+                    )
                 }
 
-                Surface(
-                    color = containerColor,
-                    contentColor = contentColor,
-                    shape = MaterialTheme.shapes.extraLarge,
-                    tonalElevation = 6.dp,
-                    shadowElevation = 6.dp,
-                    modifier = Modifier.testTag("live_photo_burst_pill")
+                // Live Photo / Burst Capture Counter Pill (updates immediately on every shot & tracks saving queue)
+                AnimatedVisibility(
+                    visible = photoFeedback.isVisible && photoFeedback.triggerCounter > 0,
+                    enter = fadeIn() + slideInVertically(initialOffsetY = { -it }),
+                    exit = fadeOut() + slideOutVertically(targetOffsetY = { -it })
                 ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    val isSummary = photoFeedback.summaryMessage != null &&
+                        !photoFeedback.isBurstActive &&
+                        photoFeedback.inFlightCounter == 0
+                    val containerColor = when {
+                        isSummary -> colorScheme.inverseSurface
+                        photoFeedback.isBurstActive -> colorScheme.tertiaryContainer
+                        else -> colorScheme.primaryContainer
+                    }
+                    val contentColor = when {
+                        isSummary -> colorScheme.inverseOnSurface
+                        photoFeedback.isBurstActive -> colorScheme.onTertiaryContainer
+                        else -> colorScheme.onPrimaryContainer
+                    }
+
+                    Surface(
+                        color = containerColor,
+                        contentColor = contentColor,
+                        shape = MaterialTheme.shapes.extraLarge,
+                        tonalElevation = 6.dp,
+                        shadowElevation = 6.dp,
+                        modifier = Modifier.testTag("live_photo_burst_pill")
                     ) {
-                        Icon(
-                            imageVector = when {
-                                isSummary -> Icons.Default.CheckCircle
-                                photoFeedback.isBurstActive -> Icons.Default.BurstMode
-                                else -> Icons.Default.CameraAlt
-                            },
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        if (isSummary) {
-                            Text(
-                                text = photoFeedback.summaryMessage.orEmpty(),
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.Medium
-                            )
-                        } else {
-                            val prefix = if (photoFeedback.isBurstActive) "BURST" else "CAPTURED"
-                            Text(
-                                text = prefix,
-                                style = MaterialTheme.typography.labelLarge,
-                                fontWeight = FontWeight.Bold
-                            )
-                            AnimatedContent(
-                                targetState = photoFeedback.triggerCounter,
-                                transitionSpec = {
-                                    (fadeIn(tween(90)) + slideInVertically { -it / 2 })
-                                        .togetherWith(fadeOut(tween(90)) + slideOutVertically { it / 2 })
+                        Row(
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = when {
+                                    isSummary -> Icons.Default.CheckCircle
+                                    photoFeedback.isBurstActive -> Icons.Default.BurstMode
+                                    else -> Icons.Default.CameraAlt
                                 },
-                                label = "burst_shot_count"
-                            ) { count ->
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            if (isSummary) {
                                 Text(
-                                    text = "#$count",
-                                    style = MaterialTheme.typography.titleSmall,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontWeight = FontWeight.ExtraBold
+                                    text = photoFeedback.summaryMessage.orEmpty(),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Medium
                                 )
-                            }
-                            if (photoFeedback.inFlightCounter > 0) {
+                            } else {
+                                val prefix = if (photoFeedback.isBurstActive) "BURST" else "CAPTURED"
                                 Text(
-                                    text = "· Saving ${photoFeedback.inFlightCounter}",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = contentColor.copy(alpha = 0.85f)
+                                    text = prefix,
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.Bold
                                 )
+                                AnimatedContent(
+                                    targetState = photoFeedback.triggerCounter,
+                                    transitionSpec = {
+                                        (fadeIn(tween(90)) + slideInVertically { -it / 2 })
+                                            .togetherWith(fadeOut(tween(90)) + slideOutVertically { it / 2 })
+                                    },
+                                    label = "burst_shot_count"
+                                ) { count ->
+                                    Text(
+                                        text = "#$count",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.ExtraBold
+                                    )
+                                }
+                                if (photoFeedback.inFlightCounter > 0) {
+                                    Text(
+                                        text = "· Saving ${photoFeedback.inFlightCounter}",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = contentColor.copy(alpha = 0.85f)
+                                    )
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            // Material 3 Toast / Snackbar Banner (Audio / Video / Errors)
-            AnimatedVisibility(
-                visible = toastMessage != null && !photoFeedback.isVisible,
-                enter = fadeIn() + slideInVertically(initialOffsetY = { -it }),
-                exit = fadeOut() + slideOutVertically(targetOffsetY = { -it }),
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(top = 12.dp, start = 16.dp, end = 16.dp)
-            ) {
-                toastMessage?.let { msg ->
-                    Surface(
-                        color = colorScheme.inverseSurface,
-                        contentColor = colorScheme.inverseOnSurface,
-                        shape = MaterialTheme.shapes.large,
-                        tonalElevation = 6.dp,
-                        shadowElevation = 6.dp
-                    ) {
-                        Text(
-                            text = msg,
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Medium,
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
-                        )
+                // Material 3 Toast / Snackbar Banner (Audio / Video / Errors)
+                AnimatedVisibility(
+                    visible = toastMessage != null && !photoFeedback.isVisible,
+                    enter = fadeIn() + slideInVertically(initialOffsetY = { -it }),
+                    exit = fadeOut() + slideOutVertically(targetOffsetY = { -it })
+                ) {
+                    toastMessage?.let { msg ->
+                        Surface(
+                            color = colorScheme.inverseSurface,
+                            contentColor = colorScheme.inverseOnSurface,
+                            shape = MaterialTheme.shapes.large,
+                            tonalElevation = 6.dp,
+                            shadowElevation = 6.dp
+                        ) {
+                            Text(
+                                text = msg,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
+                            )
+                        }
                     }
                 }
-            }
 
-            // Actionable Material 3 Storage Access Card when saving cross-media into /sdcard requires All Files Access
-            if (needsAllFilesAccessBanner && !hasAllFilesAccess && !isSettingsOpen) {
-                ElevatedCard(
-                    shape = MaterialTheme.shapes.large,
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 12.dp)
-                        .testTag("all_files_access_banner")
-                ) {
-                    Column(
-                        modifier = Modifier.padding(14.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                // Actionable Material 3 Storage Access Card when saving cross-media into /sdcard requires All Files Access
+                if (needsAllFilesAccessBanner && !hasAllFilesAccess && !isSettingsOpen) {
+                    ElevatedCard(
+                        shape = MaterialTheme.shapes.large,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 4.dp)
+                            .testTag("all_files_access_banner")
                     ) {
-                        Text(
-                            text = "Grant /sdcard All Files Access",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            text = "Android blocks saving cross-type media (such as audio in DCIM/Camera or photos in Recordings) without All Files Access.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = colorScheme.onSurfaceVariant
-                        )
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.End
+                        Column(
+                            modifier = Modifier.padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            TextButton(onClick = { viewModel.dismissAllFilesAccessBanner() }) {
-                                Text("Later")
-                            }
-                            Spacer(modifier = Modifier.width(8.dp))
-                            FilledTonalButton(onClick = { launchAllFilesAccessSettings(context) }) {
-                                Text("Grant Access")
+                            Text(
+                                text = "Grant /sdcard All Files Access",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "Android blocks saving cross-type media (such as audio in DCIM/Camera or photos in Recordings) without All Files Access.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colorScheme.onSurfaceVariant
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.End
+                            ) {
+                                TextButton(onClick = { viewModel.dismissAllFilesAccessBanner() }) {
+                                    Text("Later")
+                                }
+                                Spacer(modifier = Modifier.width(8.dp))
+                                FilledTonalButton(onClick = { launchAllFilesAccessSettings(context) }) {
+                                    Text("Grant Access")
+                                }
                             }
                         }
                     }

@@ -34,6 +34,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
+import com.example.model.CaptureOrientation
 import com.example.model.RecorderMode
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -68,6 +69,8 @@ data class CameraUiState(
     val selectedLensId: String = "1x",
     val photoResolution: String = "12MP",
     val videoResolution: String = "4K 30fps",
+    val captureOrientation: CaptureOrientation = CaptureOrientation.AUTO,
+    val detectedAutoRotation: Int = Surface.ROTATION_0,
     val cameraError: String? = null
 )
 
@@ -189,7 +192,13 @@ class CameraManager(private val context: Context) {
     private var currentTargetRotation: Int = Surface.ROTATION_0
 
     @Volatile
+    private var lastAutoDetectedRotation: Int = Surface.ROTATION_0
+
+    @Volatile
     private var hasSensorRotation: Boolean = false
+
+    @Volatile
+    private var captureOrientationPreference: CaptureOrientation = CaptureOrientation.AUTO
 
     private var isDisplayListenerRegistered = false
     private val displayManager: DisplayManager? by lazy {
@@ -205,7 +214,7 @@ class CameraManager(private val context: Context) {
                 val displayRot = previewDisplay?.rotation
                     ?: displayManager?.getDisplay(Display.DEFAULT_DISPLAY)?.rotation
                 if (displayRot != null && !hasSensorRotation) {
-                    applyTargetRotation(displayRot)
+                    updateAutoDetectedRotation(displayRot)
                 }
             }
         }
@@ -218,7 +227,7 @@ class CameraManager(private val context: Context) {
                     if (orientation == ORIENTATION_UNKNOWN) return
                     val rotation = mapSensorOrientationToSurfaceRotation(orientation)
                     hasSensorRotation = true
-                    applyTargetRotation(rotation)
+                    updateAutoDetectedRotation(rotation)
                 }
             }
         } catch (e: Exception) {
@@ -235,6 +244,26 @@ class CameraManager(private val context: Context) {
     var isTorchEnabled: Boolean = false
         private set
 
+    fun setCaptureOrientation(orientation: CaptureOrientation) {
+        captureOrientationPreference = orientation
+        val resolved = resolveCurrentRotation(lastPreviewView)
+        applyTargetRotation(resolved)
+        _cameraState.value = _cameraState.value.copy(
+            captureOrientation = orientation,
+            detectedAutoRotation = lastAutoDetectedRotation
+        )
+    }
+
+    private fun updateAutoDetectedRotation(rotation: Int) {
+        lastAutoDetectedRotation = rotation
+        if (captureOrientationPreference == CaptureOrientation.AUTO) {
+            applyTargetRotation(rotation)
+        }
+        if (_cameraState.value.detectedAutoRotation != rotation) {
+            _cameraState.value = _cameraState.value.copy(detectedAutoRotation = rotation)
+        }
+    }
+
     private fun applyTargetRotation(rotation: Int) {
         currentTargetRotation = rotation
         imageCapture?.targetRotation = rotation
@@ -243,13 +272,20 @@ class CameraManager(private val context: Context) {
         }
     }
 
-    private fun resolveCurrentRotation(previewView: PreviewView?): Int {
+    fun resolveCurrentRotation(previewView: PreviewView? = lastPreviewView): Int {
+        val fixed = captureOrientationPreference.surfaceRotation
+        if (fixed != null) {
+            currentTargetRotation = fixed
+            return fixed
+        }
         if (hasSensorRotation) {
-            return currentTargetRotation
+            currentTargetRotation = lastAutoDetectedRotation
+            return lastAutoDetectedRotation
         }
         val displayRot = previewView?.display?.rotation
             ?: displayManager?.getDisplay(Display.DEFAULT_DISPLAY)?.rotation
-            ?: currentTargetRotation
+            ?: lastAutoDetectedRotation
+        lastAutoDetectedRotation = displayRot
         currentTargetRotation = displayRot
         return displayRot
     }
@@ -518,9 +554,12 @@ class CameraManager(private val context: Context) {
             startOrientationTracking()
         }
         val initialRotation = resolveCurrentRotation(previewView)
+        val previewDisplayRotation = previewView.display?.rotation
+            ?: displayManager?.getDisplay(Display.DEFAULT_DISPLAY)?.rotation
+            ?: Surface.ROTATION_0
 
         val previewUseCase = Preview.Builder()
-            .setTargetRotation(initialRotation)
+            .setTargetRotation(previewDisplayRotation)
             .build()
             .also {
                 it.surfaceProvider = previewView.surfaceProvider
@@ -768,6 +807,8 @@ class CameraManager(private val context: Context) {
             selectedLensId = selectedLensId,
             photoResolution = actualPhotoLabel,
             videoResolution = effectiveVideoLabel,
+            captureOrientation = captureOrientationPreference,
+            detectedAutoRotation = lastAutoDetectedRotation,
             cameraError = null
         )
     }

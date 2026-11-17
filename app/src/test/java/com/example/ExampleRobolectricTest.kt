@@ -9,6 +9,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.example.camera.CameraManager
 import com.example.data.FolderRepository
 import com.example.data.MediaStorageManager
+import com.example.model.CaptureOrientation
 import com.example.model.MediaFolder
 import com.example.model.MediaType
 import com.example.model.RecorderMode
@@ -278,6 +279,83 @@ class ExampleRobolectricTest {
         assertFalse(repo.moveFolder(1, 1))
 
         // Clean up
+        repo.getFallbackConfigFile().delete()
+        repo.getSdcardConfigFile().delete()
+    }
+
+    @Test
+    fun `capture orientation maps storage keys and forced surface rotations`() {
+        assertEquals(CaptureOrientation.AUTO, CaptureOrientation.fromStorageKey(null))
+        assertEquals(CaptureOrientation.AUTO, CaptureOrientation.fromStorageKey("unknown"))
+        assertEquals(CaptureOrientation.PORTRAIT, CaptureOrientation.fromStorageKey("portrait"))
+        assertEquals(CaptureOrientation.LANDSCAPE_LEFT, CaptureOrientation.fromStorageKey("LEFT"))
+        assertEquals(CaptureOrientation.PORTRAIT_UPSIDE_DOWN, CaptureOrientation.fromStorageKey("flip"))
+        assertEquals(CaptureOrientation.LANDSCAPE_RIGHT, CaptureOrientation.fromStorageKey("Right"))
+
+        assertNull(CaptureOrientation.AUTO.surfaceRotation)
+        assertEquals(Surface.ROTATION_0, CaptureOrientation.PORTRAIT.surfaceRotation)
+        assertEquals(Surface.ROTATION_90, CaptureOrientation.LANDSCAPE_LEFT.surfaceRotation)
+        assertEquals(Surface.ROTATION_180, CaptureOrientation.PORTRAIT_UPSIDE_DOWN.surfaceRotation)
+        assertEquals(Surface.ROTATION_270, CaptureOrientation.LANDSCAPE_RIGHT.surfaceRotation)
+    }
+
+    @Test
+    fun `camera manager respects fixed capture orientation and returns to auto tracking`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val cameraManager = CameraManager(context)
+
+        assertEquals(CaptureOrientation.AUTO, cameraManager.cameraState.value.captureOrientation)
+        assertEquals(Surface.ROTATION_0, cameraManager.resolveCurrentRotation(null))
+
+        cameraManager.setCaptureOrientation(CaptureOrientation.LANDSCAPE_LEFT)
+        assertEquals(CaptureOrientation.LANDSCAPE_LEFT, cameraManager.cameraState.value.captureOrientation)
+        assertEquals(Surface.ROTATION_90, cameraManager.resolveCurrentRotation(null))
+
+        cameraManager.setCaptureOrientation(CaptureOrientation.PORTRAIT_UPSIDE_DOWN)
+        assertEquals(Surface.ROTATION_180, cameraManager.resolveCurrentRotation(null))
+
+        cameraManager.setCaptureOrientation(CaptureOrientation.LANDSCAPE_RIGHT)
+        assertEquals(Surface.ROTATION_270, cameraManager.resolveCurrentRotation(null))
+
+        cameraManager.setCaptureOrientation(CaptureOrientation.PORTRAIT)
+        assertEquals(Surface.ROTATION_0, cameraManager.resolveCurrentRotation(null))
+
+        cameraManager.setCaptureOrientation(CaptureOrientation.AUTO)
+        assertEquals(CaptureOrientation.AUTO, cameraManager.cameraState.value.captureOrientation)
+        assertEquals(Surface.ROTATION_0, cameraManager.resolveCurrentRotation(null))
+
+        cameraManager.release()
+    }
+
+    @Test
+    fun `capture orientation persists in foldercam json and defaults cleanly for legacy json`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        context.getSharedPreferences("folder_cam_v2_prefs", Context.MODE_PRIVATE)
+            .edit().clear().commit()
+        FolderRepository(context).getFallbackConfigFile().delete()
+        FolderRepository(context).getSdcardConfigFile().delete()
+
+        val repo = FolderRepository(context)
+        assertEquals(CaptureOrientation.AUTO, repo.captureOrientation.value)
+
+        repo.setCaptureOrientation(CaptureOrientation.LANDSCAPE_RIGHT)
+        assertEquals(CaptureOrientation.LANDSCAPE_RIGHT, repo.captureOrientation.value)
+
+        val jsonWithOrientation = repo.toJsonString()
+        assertTrue(jsonWithOrientation.contains("\"captureOrientation\""))
+        assertTrue(jsonWithOrientation.contains("\"RIGHT\""))
+
+        // Reload into a fresh repository instance from exported JSON
+        repo.setCaptureOrientation(CaptureOrientation.AUTO)
+        assertEquals(CaptureOrientation.AUTO, repo.captureOrientation.value)
+        assertTrue(repo.restoreFromJsonString(jsonWithOrientation))
+        assertEquals(CaptureOrientation.LANDSCAPE_RIGHT, repo.captureOrientation.value)
+
+        // Legacy JSON missing captureOrientation defaults back to AUTO
+        val legacyJson = """{"folders":[],"selectedFolderId":null,"isDarkTheme":true}"""
+        assertTrue(repo.restoreFromJsonString(legacyJson))
+        assertEquals(CaptureOrientation.AUTO, repo.captureOrientation.value)
+
         repo.getFallbackConfigFile().delete()
         repo.getSdcardConfigFile().delete()
     }

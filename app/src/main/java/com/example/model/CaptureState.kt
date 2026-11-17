@@ -1,5 +1,7 @@
 package com.example.model
 
+import android.view.Surface
+
 /**
  * Modes ordered as requested:
  * 0 -> AUDIO (default when app opens)
@@ -31,6 +33,51 @@ data class RecordingStatus(
     val currentDecibels: Float = 0f,
     val currentOutputFilePath: String? = null
 )
+
+enum class CaptureOrientation(
+    val storageKey: String,
+    val shortLabel: String,
+    val contentDescription: String,
+    val surfaceRotation: Int?
+) {
+    AUTO(
+        storageKey = "AUTO",
+        shortLabel = "Auto",
+        contentDescription = "Auto orientation",
+        surfaceRotation = null
+    ),
+    PORTRAIT(
+        storageKey = "PORTRAIT",
+        shortLabel = "Port",
+        contentDescription = "Portrait upright orientation",
+        surfaceRotation = Surface.ROTATION_0
+    ),
+    LANDSCAPE_LEFT(
+        storageKey = "LEFT",
+        shortLabel = "Left",
+        contentDescription = "Landscape left orientation",
+        surfaceRotation = Surface.ROTATION_90
+    ),
+    PORTRAIT_UPSIDE_DOWN(
+        storageKey = "FLIP",
+        shortLabel = "Flip",
+        contentDescription = "Upside down portrait orientation",
+        surfaceRotation = Surface.ROTATION_180
+    ),
+    LANDSCAPE_RIGHT(
+        storageKey = "RIGHT",
+        shortLabel = "Right",
+        contentDescription = "Landscape right orientation",
+        surfaceRotation = Surface.ROTATION_270
+    );
+
+    companion object {
+        fun fromStorageKey(key: String?): CaptureOrientation {
+            if (key.isNullOrBlank()) return AUTO
+            return entries.find { it.storageKey.equals(key.trim(), ignoreCase = true) } ?: AUTO
+        }
+    }
+}
 
 data class PhotoCaptureFeedbackState(
     val triggerCounter: Int = 0,

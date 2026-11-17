@@ -3,6 +3,7 @@ package com.example.data
 import android.content.Context
 import android.content.SharedPreferences
 import android.os.Environment
+import com.example.model.CaptureOrientation
 import com.example.model.MediaFolder
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -27,6 +28,9 @@ class FolderRepository(private val context: Context) {
 
     private val _isDarkTheme = MutableStateFlow(true)
     val isDarkTheme: StateFlow<Boolean> = _isDarkTheme.asStateFlow()
+
+    private val _captureOrientation = MutableStateFlow(CaptureOrientation.AUTO)
+    val captureOrientation: StateFlow<CaptureOrientation> = _captureOrientation.asStateFlow()
 
     init {
         loadSettings()
@@ -113,6 +117,9 @@ class FolderRepository(private val context: Context) {
         _folders.value = emptyList()
         _selectedFolderId.value = null
         _isDarkTheme.value = true
+        _captureOrientation.value = CaptureOrientation.fromStorageKey(
+            prefs.getString("capture_orientation", CaptureOrientation.AUTO.storageKey)
+        )
     }
 
     fun setDarkTheme(isDark: Boolean) {
@@ -122,6 +129,12 @@ class FolderRepository(private val context: Context) {
 
     fun toggleDarkTheme() {
         _isDarkTheme.value = !_isDarkTheme.value
+        saveAllSettings()
+    }
+
+    fun setCaptureOrientation(orientation: CaptureOrientation) {
+        if (_captureOrientation.value == orientation) return
+        _captureOrientation.value = orientation
         saveAllSettings()
     }
 
@@ -276,11 +289,13 @@ class FolderRepository(private val context: Context) {
             } else {
                 val root = JSONObject(trimmed)
                 val isDark = root.optBoolean("isDarkTheme", true)
+                val orientationKey = root.optString("captureOrientation", CaptureOrientation.AUTO.storageKey)
                 val foldersArray = root.optJSONArray("folders") ?: JSONArray()
                 val loadedList = parseFoldersArray(foldersArray)
                 val savedSelectedId = root.optString("selectedFolderId", "").ifEmpty { null }
 
                 _isDarkTheme.value = isDark
+                _captureOrientation.value = CaptureOrientation.fromStorageKey(orientationKey)
                 _folders.value = loadedList
                 _selectedFolderId.value = when {
                     loadedList.isEmpty() -> null
@@ -324,6 +339,7 @@ class FolderRepository(private val context: Context) {
         root.put("version", 1)
         root.put("configPath", "/sdcard/.foldercam")
         root.put("isDarkTheme", _isDarkTheme.value)
+        root.put("captureOrientation", _captureOrientation.value.storageKey)
         root.put("photoResolution", "12MP")
         root.put("videoResolution", "4K 30fps")
         root.put("selectedFolderId", _selectedFolderId.value ?: "")
@@ -356,6 +372,7 @@ class FolderRepository(private val context: Context) {
         prefs.edit()
             .putString("foldercam_settings_json", jsonText)
             .putBoolean("is_dark_theme", _isDarkTheme.value)
+            .putString("capture_orientation", _captureOrientation.value.storageKey)
             .putString("selected_folder_v2_id", _selectedFolderId.value)
             .apply()
 
