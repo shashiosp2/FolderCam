@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Context
 import android.util.Size
 import android.view.Surface
+import androidx.camera.core.ImageCapture
 import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ApplicationProvider
 import com.example.camera.CameraManager
@@ -358,5 +359,18 @@ class ExampleRobolectricTest {
 
         repo.getFallbackConfigFile().delete()
         repo.getSdcardConfigFile().delete()
+    }
+
+    @Test
+    fun `photo capture uses minimize latency mode instead of zsl so zoom applies accurately`() {
+        assertEquals(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY, CameraManager.DEFAULT_PHOTO_CAPTURE_MODE)
+
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val cameraManager = CameraManager(context)
+        assertFalse(cameraManager.cameraState.value.isZslActive)
+
+        cameraManager.setZoomRatio(1.0f)
+        assertEquals(1.0f, cameraManager.cameraState.value.currentZoomRatio, 0.001f)
+        cameraManager.release()
     }
 }

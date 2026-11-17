@@ -39,7 +39,6 @@ import com.example.model.RecorderMode
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import androidx.camera.core.ExperimentalZeroShutterLag
 import java.io.File
 import java.util.Locale
 import java.util.concurrent.ExecutorService
@@ -126,6 +125,9 @@ class CameraManager(private val context: Context) {
         // Default 30 FPS range for 4K video recording
         val DEFAULT_VIDEO_30FPS_RANGE = Range(30, 30)
         const val MAX_IN_FLIGHT_BURST = 6
+        // Use MINIMIZE_LATENCY instead of ZSL PRIVATE reprocessing so hardware/digital zoom crops
+        // (CONTROL_ZOOM_RATIO / SCALER_CROP_REGION) are reliably applied to captured still photos.
+        const val DEFAULT_PHOTO_CAPTURE_MODE = ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
 
         fun mapSensorOrientationToSurfaceRotation(orientation: Int): Int {
             return when (orientation) {
@@ -439,7 +441,7 @@ class CameraManager(private val context: Context) {
         isTorchEnabled = false
         activeCustomSelector = null
         val mode = if (activeMode == RecorderMode.AUDIO) RecorderMode.PHOTO else activeMode
-        bindCamera(previewView, mode)
+        bindCamera(previewView, mode, initialZoom = 1.0f, selectedLensId = "1x")
     }
 
     fun selectLens(option: LensOption) {
@@ -532,12 +534,11 @@ class CameraManager(private val context: Context) {
         boundHasVideoCapture = false
     }
 
-    @SuppressLint("UnsafeOptInUsageError")
     private fun bindCamera(
         previewView: PreviewView,
         mode: RecorderMode,
-        initialZoom: Float = 1.0f,
-        selectedLensId: String = "1x"
+        initialZoom: Float = _cameraState.value.currentZoomRatio,
+        selectedLensId: String = _cameraState.value.selectedLensId
     ) {
         val provider = cameraProvider ?: return
         if (isRecordingVideo()) return
@@ -585,7 +586,6 @@ class CameraManager(private val context: Context) {
         var activeImageCapture: ImageCapture? = null
         var activeVideoCapture: VideoCapture<Recorder>? = null
         var effectiveVideoLabel = "4K 30fps"
-        var usedZslBuilder = false
 
         if (mode == RecorderMode.VIDEO) {
             // Video Mode: Bind Preview + 4K 30fps VideoCapture with graceful quality fallbacks
@@ -631,96 +631,64 @@ class CameraManager(private val context: Context) {
                 }
             }
         } else {
-            // Photo Mode: Try ZSL at 12MP first; if hardware ZSL caps resolution below 8MP (e.g. 1920x1440 / 3MP),
-            // automatically upgrade to MINIMIZE_LATENCY / MAXIMIZE_QUALITY with full 12MP resolution.
-            val zslCandidate = buildPhotoUseCase(
-                captureMode = ImageCapture.CAPTURE_MODE_ZERO_SHUTTER_LAG,
+            // Photo Mode: Use CAPTURE_MODE_MINIMIZE_LATENCY directly (avoid ZSL PRIVATE reprocessing,
+            // which drops CONTROL_ZOOM_RATIO / SCALER_CROP_REGION on many HALs and outputs 1x photos).
+            // Verify >= 8MP (12MP target) and fall back to MAXIMIZE_QUALITY only if resolution is capped.
+            val minLatencyCandidate = buildPhotoUseCase(
+                captureMode = DEFAULT_PHOTO_CAPTURE_MODE,
                 selector = photo12MpResolutionSelector,
                 targetRotation = initialRotation
             )
-            val zslCamera = tryBindUseCases(
+            val minLatencyCamera = tryBindUseCases(
                 provider = provider,
                 selector = cameraSelector,
-                useCases = arrayOf(previewUseCase, zslCandidate)
+                useCases = arrayOf(previewUseCase, minLatencyCandidate)
             )
-            val zslPixels = resolutionPixelCount(zslCandidate)
-            val zslMeets12Mp = zslCamera != null && (zslPixels == 0L || zslPixels >= MIN_FULL_RES_PHOTO_PIXELS)
+            val minLatencyPixels = resolutionPixelCount(minLatencyCandidate)
+            val minLatencyMeets12Mp = minLatencyCamera != null &&
+                (minLatencyPixels == 0L || minLatencyPixels >= MIN_FULL_RES_PHOTO_PIXELS)
 
-            if (zslMeets12Mp) {
-                boundCamera = zslCamera
-                activeImageCapture = zslCandidate
-                usedZslBuilder = true
+            if (minLatencyMeets12Mp) {
+                boundCamera = minLatencyCamera
+                activeImageCapture = minLatencyCandidate
             } else {
-                val minLatencyCandidate = buildPhotoUseCase(
-                    captureMode = ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY,
+                val maxQualityCandidate = buildPhotoUseCase(
+                    captureMode = ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY,
                     selector = photo12MpResolutionSelector,
                     targetRotation = initialRotation
                 )
-                val minLatencyCamera = tryBindUseCases(
+                val maxQualityCamera = tryBindUseCases(
                     provider = provider,
                     selector = cameraSelector,
-                    useCases = arrayOf(previewUseCase, minLatencyCandidate)
+                    useCases = arrayOf(previewUseCase, maxQualityCandidate)
                 )
-                val minLatencyPixels = resolutionPixelCount(minLatencyCandidate)
+                val maxQualityPixels = resolutionPixelCount(maxQualityCandidate)
 
-                if (minLatencyCamera != null && (minLatencyPixels >= MIN_FULL_RES_PHOTO_PIXELS || zslCamera == null)) {
-                    boundCamera = minLatencyCamera
-                    activeImageCapture = minLatencyCandidate
-                } else {
-                    val maxQualityCandidate = buildPhotoUseCase(
-                        captureMode = ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY,
-                        selector = photo12MpResolutionSelector,
-                        targetRotation = initialRotation
-                    )
-                    val maxQualityCamera = tryBindUseCases(
-                        provider = provider,
-                        selector = cameraSelector,
-                        useCases = arrayOf(previewUseCase, maxQualityCandidate)
-                    )
-                    val maxQualityPixels = resolutionPixelCount(maxQualityCandidate)
-
-                    when {
-                        maxQualityCamera != null && maxQualityPixels >= maxOf(zslPixels, minLatencyPixels) -> {
-                            boundCamera = maxQualityCamera
-                            activeImageCapture = maxQualityCandidate
-                        }
-                        zslCamera != null && zslPixels >= minLatencyPixels -> {
-                            val reboundZsl = buildPhotoUseCase(
-                                captureMode = ImageCapture.CAPTURE_MODE_ZERO_SHUTTER_LAG,
-                                selector = photo12MpResolutionSelector,
-                                targetRotation = initialRotation
-                            )
-                            boundCamera = tryBindUseCases(
-                                provider = provider,
-                                selector = cameraSelector,
-                                useCases = arrayOf(previewUseCase, reboundZsl)
-                            )
-                            if (boundCamera != null) {
-                                activeImageCapture = reboundZsl
-                                usedZslBuilder = true
-                            }
-                        }
-                        minLatencyCamera != null -> {
-                            val reboundMinLatency = buildPhotoUseCase(
-                                captureMode = ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY,
-                                selector = photo12MpResolutionSelector,
-                                targetRotation = initialRotation
-                            )
-                            boundCamera = tryBindUseCases(
-                                provider = provider,
-                                selector = cameraSelector,
-                                useCases = arrayOf(previewUseCase, reboundMinLatency)
-                            )
-                            if (boundCamera != null) {
-                                activeImageCapture = reboundMinLatency
-                            }
+                when {
+                    maxQualityCamera != null && maxQualityPixels > minLatencyPixels -> {
+                        boundCamera = maxQualityCamera
+                        activeImageCapture = maxQualityCandidate
+                    }
+                    minLatencyCamera != null -> {
+                        val reboundMinLatency = buildPhotoUseCase(
+                            captureMode = DEFAULT_PHOTO_CAPTURE_MODE,
+                            selector = photo12MpResolutionSelector,
+                            targetRotation = initialRotation
+                        )
+                        boundCamera = tryBindUseCases(
+                            provider = provider,
+                            selector = cameraSelector,
+                            useCases = arrayOf(previewUseCase, reboundMinLatency)
+                        )
+                        if (boundCamera != null) {
+                            activeImageCapture = reboundMinLatency
                         }
                     }
                 }
 
                 if (boundCamera == null) {
                     val autoImageUseCase = ImageCapture.Builder()
-                        .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                        .setCaptureMode(DEFAULT_PHOTO_CAPTURE_MODE)
                         .setFlashMode(ImageCapture.FLASH_MODE_OFF)
                         .setTargetRotation(initialRotation)
                         .build()
@@ -764,12 +732,6 @@ class CameraManager(private val context: Context) {
             }
         }
 
-        val hardwareZslSupported = try {
-            boundCamera.cameraInfo.isZslSupported
-        } catch (e: Exception) {
-            false
-        }
-
         // Inspect zoom range & available lenses (Ultrawide -> Wide -> Zoom/Telephoto)
         val zoomState = boundCamera.cameraInfo.zoomState.value
         val minZoom = zoomState?.minZoomRatio ?: 1.0f
@@ -783,7 +745,7 @@ class CameraManager(private val context: Context) {
         )
 
         val targetZoom = initialZoom.coerceIn(minZoom, maxZoom)
-        if (targetZoom != 1.0f) {
+        if (abs(targetZoom - 1.0f) > 0.001f) {
             try {
                 boundCamera.cameraControl.setZoomRatio(targetZoom)
             } catch (e: Exception) {
@@ -799,7 +761,7 @@ class CameraManager(private val context: Context) {
         _cameraState.value = CameraUiState(
             isFrontCamera = isFrontCamera,
             isTorchEnabled = isTorchEnabled,
-            isZslActive = usedZslBuilder && hardwareZslSupported && !isTorchEnabled,
+            isZslActive = false,
             currentZoomRatio = targetZoom,
             minZoomRatio = minZoom,
             maxZoomRatio = maxZoom,
@@ -813,7 +775,6 @@ class CameraManager(private val context: Context) {
         )
     }
 
-    @SuppressLint("UnsafeOptInUsageError")
     private fun buildPhotoUseCase(
         captureMode: Int,
         selector: ResolutionSelector,
