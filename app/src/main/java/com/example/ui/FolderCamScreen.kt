@@ -110,7 +110,10 @@ fun FolderCamScreen(
     val colorScheme = MaterialTheme.colorScheme
 
     val folders by viewModel.folders.collectAsState()
+    val foldersForCurrentMode by viewModel.foldersForCurrentMode.collectAsState()
+    val selectedFolderId by viewModel.selectedFolderId.collectAsState()
     val selectedFolder by viewModel.selectedFolder.collectAsState()
+    val galleryFolder by viewModel.galleryFolder.collectAsState()
     val isDarkTheme by viewModel.isDarkTheme.collectAsState()
     val recorderMode by viewModel.recorderMode.collectAsState()
     val captureState by viewModel.captureState.collectAsState()
@@ -399,7 +402,8 @@ fun FolderCamScreen(
         },
         bottomBar = {
             DualBottomBars(
-                folders = folders,
+                folders = foldersForCurrentMode,
+                hasAnyConfiguredFolders = folders.isNotEmpty(),
                 selectedFolderId = selectedFolder?.id,
                 folderItemCounts = folderCounts,
                 currentMode = recorderMode,
@@ -777,7 +781,7 @@ fun FolderCamScreen(
     if (isSettingsOpen || folders.isEmpty()) {
         FolderSettingsDialog(
             folders = folders,
-            selectedFolderId = selectedFolder?.id,
+            selectedFolderId = selectedFolderId ?: selectedFolder?.id,
             folderCounts = folderCounts,
             isDarkTheme = isDarkTheme,
             hasAllFilesAccess = hasAllFilesAccess,
@@ -794,41 +798,30 @@ fun FolderCamScreen(
             onSelectFolder = { folder ->
                 viewModel.selectFolder(folder)
             },
-            onAddFolder = { name, audioPath, photoPath, videoPath, audioTreeUri, photoTreeUri, videoTreeUri ->
+            onAddFolder = { name, sdcardPath, treeUri, enableAudio, enablePhoto, enableVideo ->
                 viewModel.addFolder(
                     name = name,
-                    sdcardPath = photoPath,
-                    treeUri = photoTreeUri,
-                    audioSdcardPath = audioPath,
-                    photoSdcardPath = photoPath,
-                    videoSdcardPath = videoPath,
-                    audioTreeUri = audioTreeUri,
-                    photoTreeUri = photoTreeUri,
-                    videoTreeUri = videoTreeUri
+                    sdcardPath = sdcardPath,
+                    treeUri = treeUri,
+                    enableAudio = enableAudio,
+                    enablePhoto = enablePhoto,
+                    enableVideo = enableVideo
                 )
             },
-            onUpdateFolder = { folderId, name, audioPath, photoPath, videoPath, audioTreeUri, photoTreeUri, videoTreeUri ->
+            onUpdateFolder = { folderId, name, sdcardPath, treeUri, enableAudio, enablePhoto, enableVideo ->
                 viewModel.updateFolder(
                     folderId = folderId,
                     name = name,
-                    sdcardPath = photoPath,
+                    sdcardPath = sdcardPath,
                     colorHex = "#38BDF8",
-                    treeUri = photoTreeUri,
-                    audioSdcardPath = audioPath,
-                    photoSdcardPath = photoPath,
-                    videoSdcardPath = videoPath,
-                    audioTreeUri = audioTreeUri,
-                    photoTreeUri = photoTreeUri,
-                    videoTreeUri = videoTreeUri
+                    treeUri = treeUri,
+                    enableAudio = enableAudio,
+                    enablePhoto = enablePhoto,
+                    enableVideo = enableVideo
                 )
             },
-            onUpdateFolderMediaPath = { folderId, mediaType, sdcardPath, treeUri ->
-                viewModel.updateFolderMediaPath(
-                    folderId = folderId,
-                    mediaType = mediaType,
-                    sdcardPath = sdcardPath,
-                    treeUri = treeUri
-                )
+            onToggleFolderMode = { folderId, mode, enabled ->
+                viewModel.setFolderModeEnabled(folderId, mode, enabled)
             },
             onDeleteFolder = { folderId ->
                 viewModel.deleteFolder(folderId)
@@ -855,10 +848,10 @@ fun FolderCamScreen(
     if (isGalleryOpen) {
         GalleryBottomSheet(
             folders = folders,
-            selectedFolder = selectedFolder,
+            selectedFolder = galleryFolder,
             mediaItems = currentFolderMedia,
             onFolderSelected = { folder ->
-                viewModel.selectFolder(folder)
+                viewModel.selectGalleryFolder(folder)
             },
             onDeleteItem = { item ->
                 viewModel.deleteMediaItem(item)

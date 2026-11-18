@@ -90,6 +90,7 @@ import java.util.Locale
 @Composable
 fun DualBottomBars(
     folders: List<MediaFolder>,
+    hasAnyConfiguredFolders: Boolean = folders.isNotEmpty(),
     selectedFolderId: String?,
     folderItemCounts: Map<String, Int>,
     currentMode: RecorderMode,
@@ -359,7 +360,7 @@ fun DualBottomBars(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                if (folders.isEmpty()) {
+                if (!hasAnyConfiguredFolders) {
                     item {
                         AssistChip(
                             onClick = onAddFolderClick,
@@ -382,6 +383,36 @@ fun DualBottomBars(
                                 leadingIconContentColor = colorScheme.onErrorContainer
                             ),
                             modifier = Modifier.testTag("empty_folder_prompt_chip")
+                        )
+                    }
+                } else if (folders.isEmpty()) {
+                    val modeLabel = when (currentMode) {
+                        RecorderMode.AUDIO -> "Audio"
+                        RecorderMode.PHOTO -> "Photos"
+                        RecorderMode.VIDEO -> "Video"
+                    }
+                    item {
+                        AssistChip(
+                            onClick = onAddFolderClick,
+                            label = {
+                                Text(
+                                    text = "No folders enabled for $modeLabel · Configure",
+                                    style = MaterialTheme.typography.labelLarge
+                                )
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Default.Folder,
+                                    contentDescription = "Configure Folders",
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            },
+                            colors = AssistChipDefaults.assistChipColors(
+                                containerColor = colorScheme.secondaryContainer,
+                                labelColor = colorScheme.onSecondaryContainer,
+                                leadingIconContentColor = colorScheme.onSecondaryContainer
+                            ),
+                            modifier = Modifier.testTag("no_mode_folders_prompt_chip")
                         )
                     }
                 } else {

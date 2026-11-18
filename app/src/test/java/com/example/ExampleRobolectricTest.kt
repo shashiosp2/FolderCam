@@ -375,7 +375,7 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `folder repository saves restores and updates separate audio photo and video paths`() {
+    fun `folder repository saves restores and toggles audio photo and video flags`() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         context.getSharedPreferences("folder_cam_v2_prefs", Context.MODE_PRIVATE)
             .edit().clear().commit()
@@ -383,103 +383,102 @@ class ExampleRobolectricTest {
         FolderRepository(context).getSdcardConfigFile().delete()
 
         val repo = FolderRepository(context)
-        val created = repo.addFolder(
-            name = "FieldKit",
-            sdcardPath = "/sdcard/DCIM/FieldKit",
-            audioSdcardPath = "/sdcard/Recordings/FieldAudio",
-            photoSdcardPath = "/sdcard/DCIM/FieldPhotos",
-            videoSdcardPath = "/sdcard/Movies/FieldVideos"
+        val voiceOnly = repo.addFolder(
+            name = "VoiceNotes",
+            sdcardPath = "/sdcard/Recordings/VoiceNotes",
+            enableAudio = true,
+            enablePhoto = false,
+            enableVideo = false
         )
 
-        assertTrue(created.hasSeparateMediaPaths())
-        assertEquals("/sdcard/Recordings/FieldAudio", created.pathFor(MediaType.AUDIO))
-        assertEquals("/sdcard/DCIM/FieldPhotos", created.pathFor(MediaType.PHOTO))
-        assertEquals("/sdcard/Movies/FieldVideos", created.pathFor(MediaType.VIDEO))
+        assertEquals("/sdcard/Recordings/VoiceNotes", voiceOnly.sdcardPath)
+        assertTrue(voiceOnly.enableAudio)
+        assertFalse(voiceOnly.enablePhoto)
+        assertFalse(voiceOnly.enableVideo)
+        assertTrue(voiceOnly.isEnabledFor(RecorderMode.AUDIO))
+        assertFalse(voiceOnly.isEnabledFor(RecorderMode.PHOTO))
+        assertFalse(voiceOnly.isEnabledFor(RecorderMode.VIDEO))
 
-        // Export and restore JSON
+        // Export & restore preserves toggle states
         val exportedJson = repo.toJsonString()
-        assertTrue(exportedJson.contains("/sdcard/Recordings/FieldAudio"))
-        assertTrue(exportedJson.contains("/sdcard/DCIM/FieldPhotos"))
-        assertTrue(exportedJson.contains("/sdcard/Movies/FieldVideos"))
+        assertTrue(exportedJson.contains("\"enableAudio\": true"))
+        assertTrue(exportedJson.contains("\"enablePhoto\": false"))
+        assertTrue(exportedJson.contains("\"enableVideo\": false"))
 
-        repo.deleteFolder(created.id)
+        repo.deleteFolder(voiceOnly.id)
         assertTrue(repo.restoreFromJsonString(exportedJson))
         val restored = repo.folders.value.first()
-        assertEquals("/sdcard/Recordings/FieldAudio", restored.pathFor(MediaType.AUDIO))
-        assertEquals("/sdcard/DCIM/FieldPhotos", restored.pathFor(MediaType.PHOTO))
-        assertEquals("/sdcard/Movies/FieldVideos", restored.pathFor(MediaType.VIDEO))
+        assertTrue(restored.enableAudio)
+        assertFalse(restored.enablePhoto)
+        assertFalse(restored.enableVideo)
 
-        // Updating a single media type leaves other media paths intact
-        repo.updateFolderMediaPath(
-            folderId = restored.id,
-            mediaType = MediaType.AUDIO,
-            sdcardPath = "/sdcard/Music/CustomVoice",
-            treeUri = null
-        )
-        val updated = repo.folders.value.first()
-        assertEquals("/sdcard/Music/CustomVoice", updated.pathFor(MediaType.AUDIO))
-        assertEquals("/sdcard/DCIM/FieldPhotos", updated.pathFor(MediaType.PHOTO))
-        assertEquals("/sdcard/Movies/FieldVideos", updated.pathFor(MediaType.VIDEO))
+        // Toggle Video ON via setFolderModeEnabled
+        repo.setFolderModeEnabled(restored.id, RecorderMode.VIDEO, true)
+        val toggled = repo.folders.value.first()
+        assertTrue(toggled.enableAudio)
+        assertFalse(toggled.enablePhoto)
+        assertTrue(toggled.enableVideo)
 
-        // Legacy single-path JSON falls back cleanly for all 3 media types
+        // Legacy JSON missing toggle keys defaults all 3 modes to true
         val legacyJson = """{"folders":[{"id":"legacy1","name":"Legacy","sdcardPath":"/sdcard/DCIM/Legacy"}],"selectedFolderId":"legacy1"}"""
         assertTrue(repo.restoreFromJsonString(legacyJson))
         val legacy = repo.folders.value.first()
-        assertFalse(legacy.hasSeparateMediaPaths())
-        assertEquals("/sdcard/DCIM/Legacy", legacy.pathFor(MediaType.AUDIO))
-        assertEquals("/sdcard/DCIM/Legacy", legacy.pathFor(MediaType.PHOTO))
-        assertEquals("/sdcard/DCIM/Legacy", legacy.pathFor(MediaType.VIDEO))
+        assertTrue(legacy.enableAudio)
+        assertTrue(legacy.enablePhoto)
+        assertTrue(legacy.enableVideo)
 
         repo.getFallbackConfigFile().delete()
         repo.getSdcardConfigFile().delete()
     }
 
     @Test
-    fun `media storage routes audio photo and video into three separate folders and aggregates counts`() {
-        runBlocking {
-            val context = ApplicationProvider.getApplicationContext<Context>()
-            val storage = MediaStorageManager(context)
-            val separateFolder = MediaFolder(
-                id = "sep_test",
-                name = "SeparateMedia",
-                sdcardPath = "/sdcard/DCIM/SepPhotosTest",
-                audioSdcardPath = "/sdcard/Recordings/SepAudioTest",
-                photoSdcardPath = "/sdcard/DCIM/SepPhotosTest",
-                videoSdcardPath = "/sdcard/Movies/SepVideosTest"
-            )
+    fun `viewmodel filters bottom bar folders by active mode and keeps per-mode selection`() {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        app.getSharedPreferences("folder_cam_v2_prefs", Context.MODE_PRIVATE)
+            .edit().clear().commit()
+        FolderRepository(app).getFallbackConfigFile().delete()
+        FolderRepository(app).getSdcardConfigFile().delete()
 
-            val audioOut = storage.prepareOutputFile(separateFolder, MediaType.AUDIO)
-            audioOut.parentFile?.mkdirs()
-            audioOut.writeBytes(byteArrayOf(1, 2, 3))
-            val audioRes = storage.finalizeCapturedFile(separateFolder, audioOut, MediaType.AUDIO)
-            assertEquals("/sdcard/Recordings/SepAudioTest/${audioOut.name}", audioRes.destinationPath)
+        val viewModel = FolderCamViewModel(app)
+        val audioFolder = viewModel.addFolder(
+            name = "Voice",
+            sdcardPath = "/sdcard/Recordings/Voice",
+            enableAudio = true,
+            enablePhoto = false,
+            enableVideo = false
+        )
+        val cameraFolder = viewModel.addFolder(
+            name = "TripPhotos",
+            sdcardPath = "/sdcard/DCIM/TripPhotos",
+            enableAudio = false,
+            enablePhoto = true,
+            enableVideo = false
+        )
 
-            val photoOut = storage.prepareOutputFile(separateFolder, MediaType.PHOTO)
-            photoOut.parentFile?.mkdirs()
-            photoOut.writeBytes(byteArrayOf(4, 5, 6))
-            val photoRes = storage.finalizeCapturedFile(separateFolder, photoOut, MediaType.PHOTO)
-            assertEquals("/sdcard/DCIM/SepPhotosTest/${photoOut.name}", photoRes.destinationPath)
+        // Default mode is AUDIO -> only Voice appears and is selected
+        assertEquals(RecorderMode.AUDIO, viewModel.recorderMode.value)
+        assertEquals(listOf(audioFolder.id), viewModel.foldersForCurrentMode.value.map { it.id })
+        assertEquals(audioFolder.id, viewModel.selectedFolder.value?.id)
 
-            val videoOut = storage.prepareOutputFile(separateFolder, MediaType.VIDEO)
-            videoOut.parentFile?.mkdirs()
-            videoOut.writeBytes(byteArrayOf(7, 8, 9))
-            val videoRes = storage.finalizeCapturedFile(separateFolder, videoOut, MediaType.VIDEO)
-            assertEquals("/sdcard/Movies/SepVideosTest/${videoOut.name}", videoRes.destinationPath)
+        // Switch to PHOTO -> only TripPhotos appears and is auto-selected
+        viewModel.setRecorderMode(RecorderMode.PHOTO)
+        assertEquals(listOf(cameraFolder.id), viewModel.foldersForCurrentMode.value.map { it.id })
+        assertEquals(cameraFolder.id, viewModel.selectedFolder.value?.id)
 
-            val items = storage.getMediaItemsForFolder(separateFolder)
-            assertEquals(3, items.size)
-            assertEquals(3, storage.getFolderMediaCount(separateFolder))
-            assertTrue(items.any { it.type == MediaType.AUDIO && it.name == audioOut.name })
-            assertTrue(items.any { it.type == MediaType.PHOTO && it.name == photoOut.name })
-            assertTrue(items.any { it.type == MediaType.VIDEO && it.name == videoOut.name })
+        // Switch to VIDEO -> neither folder has Video enabled
+        viewModel.setRecorderMode(RecorderMode.VIDEO)
+        assertTrue(viewModel.foldersForCurrentMode.value.isEmpty())
+        assertNull(viewModel.selectedFolder.value)
+        // Gallery still remains accessible for configured folders
+        assertEquals(2, viewModel.folders.value.size)
 
-            // Clean up
-            audioRes.finalFile.delete()
-            photoRes.finalFile.delete()
-            videoRes.finalFile.delete()
-            File("/sdcard/Recordings/SepAudioTest").delete()
-            File("/sdcard/DCIM/SepPhotosTest").delete()
-            File("/sdcard/Movies/SepVideosTest").delete()
-        }
+        // Enable Video on TripPhotos -> immediately appears & auto-selects in Video mode
+        viewModel.setFolderModeEnabled(cameraFolder.id, RecorderMode.VIDEO, true)
+        assertEquals(listOf(cameraFolder.id), viewModel.foldersForCurrentMode.value.map { it.id })
+        assertEquals(cameraFolder.id, viewModel.selectedFolder.value?.id)
+
+        // Clean up
+        viewModel.folderRepository.getFallbackConfigFile().delete()
+        viewModel.folderRepository.getSdcardConfigFile().delete()
     }
 }

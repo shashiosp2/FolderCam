@@ -174,8 +174,8 @@ fun WaveformVisualizer(
                 label = {
                     Text(
                         text = targetFolder?.let {
-                            "Audio -> ${it.pathFor(MediaType.AUDIO)}"
-                        } ?: "Configure Audio Folder",
+                            "Audio -> ${it.sdcardPath}"
+                        } ?: "Enable an Audio Folder in Settings",
                         style = MaterialTheme.typography.labelMedium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis

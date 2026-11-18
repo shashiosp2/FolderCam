@@ -172,15 +172,10 @@ class MediaStorageManager(private val context: Context) {
         }
     }
 
-    fun getMirrorDirectory(folder: MediaFolder, type: MediaType? = null): File {
-        val targetPath = if (type != null) folder.pathFor(type) else folder.sdcardPath
-        return getMirrorDirectoryForPath(targetPath, folder.name)
-    }
-
-    private fun getMirrorDirectoryForPath(sdcardPath: String, fallbackName: String): File {
-        val relative = sdcardPath.removePrefix("/sdcard").trimStart('/')
+    fun getMirrorDirectory(folder: MediaFolder): File {
+        val relative = folder.sdcardPath.removePrefix("/sdcard").trimStart('/')
         val safeRelative = if (relative.isEmpty()) {
-            fallbackName.replace("[^a-zA-Z0-9_-]".toRegex(), "_")
+            folder.name.replace("[^a-zA-Z0-9_-]".toRegex(), "_")
         } else {
             relative
         }
@@ -213,26 +208,21 @@ class MediaStorageManager(private val context: Context) {
         }
     }
 
-    fun prepareStagingFallbackFile(
-        folder: MediaFolder,
-        desiredFileName: String,
-        type: MediaType = MediaType.AUDIO
-    ): File {
-        val mirrorDir = getMirrorDirectory(folder, type)
+    fun prepareStagingFallbackFile(folder: MediaFolder, desiredFileName: String): File {
+        val mirrorDir = getMirrorDirectory(folder)
         return File(mirrorDir, desiredFileName)
     }
 
     fun prepareFastPhotoFile(folder: MediaFolder): File {
-        val mirrorDir = getMirrorDirectory(folder, MediaType.PHOTO)
+        val mirrorDir = getMirrorDirectory(folder)
         return File(mirrorDir, buildUniqueFileName(MediaType.PHOTO))
     }
 
     fun prepareOutputFile(folder: MediaFolder, type: MediaType): File {
         val fileName = buildUniqueFileName(type)
-        val targetSdcardPath = folder.pathFor(type)
 
         try {
-            val realSdcardDir = toRealFile(targetSdcardPath)
+            val realSdcardDir = toRealFile(folder.sdcardPath)
             if (canWriteDirectlyToSdcardDir(realSdcardDir)) {
                 return File(realSdcardDir, fileName)
             }
@@ -240,7 +230,7 @@ class MediaStorageManager(private val context: Context) {
             // Fallback to mirror staging file
         }
 
-        val mirrorDir = getMirrorDirectory(folder, type)
+        val mirrorDir = getMirrorDirectory(folder)
         return File(mirrorDir, fileName)
     }
 
@@ -249,20 +239,17 @@ class MediaStorageManager(private val context: Context) {
         capturedFile: File,
         type: MediaType
     ): MediaSaveResult = withContext(Dispatchers.IO) {
-        val targetSdcardPath = folder.pathFor(type)
-        val targetTreeUri = folder.treeUriFor(type)
-
         if (!capturedFile.exists()) {
             return@withContext MediaSaveResult(
                 savedToPublicSdcard = false,
-                destinationPath = targetSdcardPath,
+                destinationPath = folder.sdcardPath,
                 finalFile = capturedFile,
                 errorMessage = "Captured file not found"
             )
         }
 
         val mimeType = mimeTypeFor(type)
-        val realSdcardDir = toRealFile(targetSdcardPath)
+        val realSdcardDir = toRealFile(folder.sdcardPath)
         val alreadyInTargetSdcardDir = try {
             capturedFile.parentFile?.canonicalPath == realSdcardDir.canonicalPath
         } catch (e: Exception) {
@@ -274,7 +261,7 @@ class MediaStorageManager(private val context: Context) {
             scanMediaFile(capturedFile.absolutePath, mimeType)
             return@withContext MediaSaveResult(
                 savedToPublicSdcard = true,
-                destinationPath = "$targetSdcardPath/${capturedFile.name}",
+                destinationPath = "${folder.sdcardPath}/${capturedFile.name}",
                 finalFile = capturedFile
             )
         }
@@ -289,7 +276,7 @@ class MediaStorageManager(private val context: Context) {
                     scanMediaFile(destFile.absolutePath, mimeType)
                     return@withContext MediaSaveResult(
                         savedToPublicSdcard = true,
-                        destinationPath = "$targetSdcardPath/${destFile.name}",
+                        destinationPath = "${folder.sdcardPath}/${destFile.name}",
                         finalFile = destFile
                     )
                 }
@@ -298,13 +285,13 @@ class MediaStorageManager(private val context: Context) {
             // Fall through to SAF / MediaStore
         }
 
-        // 3. If folder has a SAF treeUri for this media type, export to the exact folder
-        targetTreeUri?.let { uriStr ->
+        // 3. If folder has a SAF treeUri, export to the exact folder
+        folder.treeUri?.let { uriStr ->
             try {
                 val treeUri = Uri.parse(uriStr)
                 val targetDocUri = resolveOrCreateSubfolderDocUri(
                     treeUri = treeUri,
-                    targetSdcardPath = targetSdcardPath
+                    targetSdcardPath = folder.sdcardPath
                 )
                 if (targetDocUri != null) {
                     val newDocUri = DocumentsContract.createDocument(
@@ -321,7 +308,7 @@ class MediaStorageManager(private val context: Context) {
                         }
                         return@withContext MediaSaveResult(
                             savedToPublicSdcard = true,
-                            destinationPath = "$targetSdcardPath/${capturedFile.name}",
+                            destinationPath = "${folder.sdcardPath}/${capturedFile.name}",
                             finalFile = capturedFile
                         )
                     }
@@ -333,7 +320,7 @@ class MediaStorageManager(private val context: Context) {
 
         // 4. Scoped Storage MediaStore fallback ONLY when Android allows this MediaType in the exact target folder.
         //    Never silently move Audio out of DCIM/Camera into Music/ or Photos out of Recordings/ into DCIM/!
-        val relativeFromSdcard = targetSdcardPath.removePrefix("/sdcard").trim('/')
+        val relativeFromSdcard = folder.sdcardPath.removePrefix("/sdcard").trim('/')
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && isMediaStoreCompatible(type, relativeFromSdcard)) {
             try {
                 val collectionUri = when (type) {
@@ -361,7 +348,7 @@ class MediaStorageManager(private val context: Context) {
                     resolver.update(itemUri, values, null, null)
                     return@withContext MediaSaveResult(
                         savedToPublicSdcard = true,
-                        destinationPath = "$targetSdcardPath/${capturedFile.name}",
+                        destinationPath = "${folder.sdcardPath}/${capturedFile.name}",
                         finalFile = capturedFile
                     )
                 }
@@ -375,13 +362,13 @@ class MediaStorageManager(private val context: Context) {
         val needsPermission = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !hasAllFilesAccess()
         return@withContext MediaSaveResult(
             savedToPublicSdcard = false,
-            destinationPath = targetSdcardPath,
+            destinationPath = folder.sdcardPath,
             finalFile = capturedFile,
             requiresAllFilesAccess = needsPermission,
             errorMessage = if (needsPermission) {
-                "Grant 'All Files Access' in Settings to save ${type.name.lowercase()} directly to $targetSdcardPath"
+                "Grant 'All Files Access' in Settings to save ${type.name.lowercase()} directly to ${folder.sdcardPath}"
             } else {
-                "Could not write directly to $targetSdcardPath; kept in app storage"
+                "Could not write directly to ${folder.sdcardPath}; kept in app storage"
             }
         )
     }
@@ -482,89 +469,56 @@ class MediaStorageManager(private val context: Context) {
         MediaType.AUDIO -> "audio/mp4"
     }
 
-    private fun extensionsFor(type: MediaType): Set<String> = when (type) {
-        MediaType.PHOTO -> setOf("jpg", "jpeg", "png")
-        MediaType.VIDEO -> setOf("mp4")
-        MediaType.AUDIO -> setOf("m4a", "aac", "wav")
-    }
-
     suspend fun getMediaItemsForFolder(folder: MediaFolder): List<MediaItem> = withContext(Dispatchers.IO) {
-        val targets = listOf(
-            MediaType.AUDIO to folder.pathFor(MediaType.AUDIO),
-            MediaType.PHOTO to folder.pathFor(MediaType.PHOTO),
-            MediaType.VIDEO to folder.pathFor(MediaType.VIDEO)
-        )
-        val seenCanonicalPaths = linkedSetOf<String>()
-        val collected = mutableListOf<MediaItem>()
+        val validExts = setOf("jpg", "jpeg", "png", "mp4", "m4a", "aac", "wav")
+        val filesByName = linkedMapOf<String, File>()
 
-        for ((expectedType, targetPath) in targets) {
-            val validExts = extensionsFor(expectedType)
-            val filesByName = linkedMapOf<String, File>()
-
-            try {
-                val realDir = toRealFile(targetPath)
-                realDir.listFiles()?.filter { it.isFile && it.extension.lowercase() in validExts }
-                    ?.forEach { file ->
-                        filesByName[file.name] = file
-                    }
-            } catch (e: Exception) {
-                // Ignore
-            }
-
-            try {
-                val mirrorDir = getMirrorDirectoryForPath(targetPath, folder.name)
-                mirrorDir.listFiles()?.filter { it.isFile && it.extension.lowercase() in validExts }
-                    ?.forEach { file ->
-                        filesByName.putIfAbsent(file.name, file)
-                    }
-            } catch (e: Exception) {
-                // Ignore
-            }
-
-            for (file in filesByName.values) {
-                val canonicalKey = try {
-                    file.canonicalPath
-                } catch (_: Exception) {
-                    file.absolutePath
+        try {
+            val realDir = toRealFile(folder.sdcardPath)
+            realDir.listFiles()?.filter { it.isFile && it.extension.lowercase() in validExts }
+                ?.forEach { file ->
+                    filesByName[file.name] = file
                 }
-                if (seenCanonicalPaths.add(canonicalKey)) {
-                    collected.add(parseMediaItem(file, folder.id, "${folder.name} ($targetPath)"))
-                }
-            }
+        } catch (e: Exception) {
+            // Ignore
         }
 
-        collected.sortedByDescending { it.timestamp }
+        try {
+            val mirrorDir = getMirrorDirectory(folder)
+            mirrorDir.listFiles()?.filter { it.isFile && it.extension.lowercase() in validExts }
+                ?.forEach { file ->
+                    filesByName.putIfAbsent(file.name, file)
+                }
+        } catch (e: Exception) {
+            // Ignore
+        }
+
+        filesByName.values
+            .map { file -> parseMediaItem(file, folder.id, folder.name) }
+            .sortedByDescending { it.timestamp }
     }
 
     suspend fun getFolderMediaCount(folder: MediaFolder): Int = withContext(Dispatchers.IO) {
-        val targets = listOf(
-            MediaType.AUDIO to folder.pathFor(MediaType.AUDIO),
-            MediaType.PHOTO to folder.pathFor(MediaType.PHOTO),
-            MediaType.VIDEO to folder.pathFor(MediaType.VIDEO)
-        )
-        val seenKeys = mutableSetOf<String>()
-        for ((expectedType, targetPath) in targets) {
-            val validExts = extensionsFor(expectedType)
-            val namesInType = mutableSetOf<String>()
-            try {
-                toRealFile(targetPath).listFiles()
-                    ?.filter { it.isFile && it.extension.lowercase() in validExts }
-                    ?.forEach { namesInType.add(it.name) }
-            } catch (e: Exception) {
-                // Ignore
-            }
-            try {
-                getMirrorDirectoryForPath(targetPath, folder.name).listFiles()
-                    ?.filter { it.isFile && it.extension.lowercase() in validExts }
-                    ?.forEach { namesInType.add(it.name) }
-            } catch (e: Exception) {
-                // Ignore
-            }
-            namesInType.forEach { name ->
-                seenKeys.add("${expectedType.name}:$targetPath:$name")
-            }
+        val validExts = setOf("jpg", "jpeg", "png", "mp4", "m4a", "aac", "wav")
+        val fileNames = mutableSetOf<String>()
+
+        try {
+            toRealFile(folder.sdcardPath).listFiles()
+                ?.filter { it.isFile && it.extension.lowercase() in validExts }
+                ?.forEach { fileNames.add(it.name) }
+        } catch (e: Exception) {
+            // Ignore
         }
-        seenKeys.size
+
+        try {
+            getMirrorDirectory(folder).listFiles()
+                ?.filter { it.isFile && it.extension.lowercase() in validExts }
+                ?.forEach { fileNames.add(it.name) }
+        } catch (e: Exception) {
+            // Ignore
+        }
+
+        fileNames.size
     }
 
     fun deleteMediaItem(item: MediaItem, folder: MediaFolder?): Boolean {
@@ -578,27 +532,24 @@ class MediaStorageManager(private val context: Context) {
             e.printStackTrace()
         }
         if (folder != null) {
-            val candidatePaths = (listOf(folder.pathFor(item.type)) + folder.distinctPaths()).distinct()
-            for (path in candidatePaths) {
-                try {
-                    val mirrorFile = File(getMirrorDirectoryForPath(path, folder.name), item.name)
-                    if (mirrorFile.exists() && mirrorFile.delete()) {
-                        deleted = true
-                    }
-                    val realFile = File(toRealFile(path), item.name)
-                    if (realFile.exists() && realFile.delete()) {
-                        deleted = true
-                        scanMediaFile(realFile.absolutePath, mimeTypeFor(item.type))
-                    }
-                } catch (e: Exception) {
-                    // Ignore
+            try {
+                val mirrorFile = File(getMirrorDirectory(folder), item.name)
+                if (mirrorFile.exists() && mirrorFile.delete()) {
+                    deleted = true
                 }
+                val realFile = File(toRealFile(folder.sdcardPath), item.name)
+                if (realFile.exists() && realFile.delete()) {
+                    deleted = true
+                    scanMediaFile(realFile.absolutePath, mimeTypeFor(item.type))
+                }
+            } catch (e: Exception) {
+                // Ignore
             }
         }
         return deleted
     }
 
-    private fun parseMediaItem(file: File, folderId: String, folderDisplay: String): MediaItem {
+    private fun parseMediaItem(file: File, folderId: String, folderName: String): MediaItem {
         val ext = file.extension.lowercase()
         val type = when (ext) {
             "jpg", "jpeg", "png" -> MediaType.PHOTO
@@ -638,7 +589,7 @@ class MediaStorageManager(private val context: Context) {
             uri = uri,
             type = type,
             folderId = folderId,
-            folderName = folderDisplay,
+            folderName = folderName,
             timestamp = file.lastModified(),
             durationSeconds = durationSec,
             sizeBytes = file.length()
