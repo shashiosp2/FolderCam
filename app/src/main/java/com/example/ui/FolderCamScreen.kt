@@ -22,7 +22,9 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -79,6 +81,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
@@ -172,9 +175,9 @@ fun FolderCamScreen(
         pageCount = { RecorderMode.entries.size }
     )
 
-    // Sync pager swipe -> ViewModel recorderMode
-    LaunchedEffect(pagerState.currentPage) {
-        val swipedMode = RecorderMode.fromIndex(pagerState.currentPage)
+    // Sync pager swipe -> ViewModel recorderMode once scroll settles (prevents mid-animation rollback)
+    LaunchedEffect(pagerState.settledPage) {
+        val swipedMode = RecorderMode.fromIndex(pagerState.settledPage)
         if (swipedMode != recorderMode) {
             viewModel.setRecorderMode(swipedMode)
         }
@@ -534,12 +537,8 @@ fun FolderCamScreen(
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
-                                .pointerInput(Unit) {
-                                    detectTransformGestures { _, _, zoom, _ ->
-                                        if (zoom != 1.0f) {
-                                            cameraManager.applyPinchZoom(zoom)
-                                        }
-                                    }
+                                .pinchToZoomOnly { zoom ->
+                                    cameraManager.applyPinchZoom(zoom)
                                 }
                         )
                     }
@@ -547,12 +546,8 @@ fun FolderCamScreen(
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
-                                .pointerInput(Unit) {
-                                    detectTransformGestures { _, _, zoom, _ ->
-                                        if (zoom != 1.0f) {
-                                            cameraManager.applyPinchZoom(zoom)
-                                        }
-                                    }
+                                .pinchToZoomOnly { zoom ->
+                                    cameraManager.applyPinchZoom(zoom)
                                 }
                         )
                     }
@@ -906,6 +901,46 @@ private fun CameraPermissionCard(
                 }
             }
         }
+    }
+}
+
+private fun Modifier.pinchToZoomOnly(
+    onZoom: (Float) -> Unit
+): Modifier = pointerInput(Unit) {
+    awaitEachGesture {
+        awaitFirstDown(requireUnconsumed = false)
+        var pinchStarted = false
+        val touchSlop = viewConfiguration.touchSlop
+        var zoomDistanceAccum = 0f
+
+        do {
+            val event = awaitPointerEvent()
+            val pressedPointers = event.changes.filter { it.pressed }
+            if (pressedPointers.size >= 2) {
+                val zoomChange = event.calculateZoom()
+                if (!pinchStarted) {
+                    val span = (pressedPointers[0].position - pressedPointers[1].position).getDistance()
+                    zoomDistanceAccum += kotlin.math.abs(1f - zoomChange) * span
+                    if (zoomDistanceAccum > touchSlop || kotlin.math.abs(1f - zoomChange) > 0.01f) {
+                        pinchStarted = true
+                    }
+                }
+                if (pinchStarted && zoomChange != 1f) {
+                    onZoom(zoomChange)
+                }
+                event.changes.forEach { change ->
+                    if (change.positionChanged()) {
+                        change.consume()
+                    }
+                }
+            } else if (pinchStarted) {
+                event.changes.forEach { change ->
+                    if (change.positionChanged()) {
+                        change.consume()
+                    }
+                }
+            }
+        } while (event.changes.any { it.pressed })
     }
 }
 
