@@ -26,12 +26,42 @@ enum class CaptureState {
     RECORDING_AUDIO
 }
 
+enum class RecordingOrigin {
+    IN_APP,
+    WIDGET
+}
+
+enum class VideoLensPreference(
+    val storageKey: String,
+    val displayLabel: String,
+    val shortBadge: String
+) {
+    WIDE(
+        storageKey = "WIDE",
+        displayLabel = "Wide (1x)",
+        shortBadge = "1x"
+    ),
+    ULTRAWIDE(
+        storageKey = "ULTRAWIDE",
+        displayLabel = "Ultra-Wide (0.5x)",
+        shortBadge = "0.5x"
+    );
+
+    companion object {
+        fun fromStorageKey(key: String?): VideoLensPreference {
+            if (key.isNullOrBlank()) return WIDE
+            return entries.find { it.storageKey.equals(key.trim(), ignoreCase = true) } ?: WIDE
+        }
+    }
+}
+
 data class RecordingStatus(
     val state: CaptureState = CaptureState.IDLE,
     val durationSeconds: Int = 0,
     val amplitudes: List<Float> = emptyList(),
     val currentDecibels: Float = 0f,
-    val currentOutputFilePath: String? = null
+    val currentOutputFilePath: String? = null,
+    val isMicPreemptedByCall: Boolean = false
 )
 
 enum class CaptureOrientation(
@@ -83,7 +113,9 @@ data class PhotoCaptureFeedbackState(
     val triggerCounter: Int = 0,
     val savedCounter: Int = 0,
     val inFlightCounter: Int = 0,
+    val bufferedRamCount: Int = 0,
     val isBurstActive: Boolean = false,
+    val isDraining: Boolean = false,
     val lastFlashTriggerId: Long = 0L,
     val targetFolderPath: String = "",
     val summaryMessage: String? = null,

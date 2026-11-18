@@ -2,33 +2,58 @@ package com.example
 
 import android.app.Application
 import android.content.Context
+import android.provider.Settings
 import android.util.Size
 import android.view.Surface
 import androidx.camera.core.ImageCapture
 import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ApplicationProvider
 import com.example.camera.CameraManager
+import com.example.camera.LensOption
 import com.example.data.FolderRepository
 import com.example.data.MediaStorageManager
 import com.example.model.CaptureOrientation
 import com.example.model.MediaFolder
 import com.example.model.MediaType
 import com.example.model.RecorderMode
+import com.example.model.VideoLensPreference
+import com.example.service.BurstBufferManager
+import com.example.service.RecordingCoordinator
+import com.example.service.RecordingForegroundService
+import com.example.system.DndController
 import com.example.ui.FolderCamViewModel
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.io.File
+import java.util.concurrent.CopyOnWriteArrayList
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class ExampleRobolectricTest {
+
+    @Before
+    fun setUp() {
+        RecordingCoordinator.resetForTests()
+    }
+
+    @After
+    fun tearDown() {
+        RecordingCoordinator.resetForTests()
+    }
 
     @Test
     fun `read string from context`() {
@@ -38,7 +63,7 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `folder repository starts empty and saves and restores foldercam json`() {
+    fun `folder repository initializes mandatory inbox and saves and restores foldercam json`() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         context.getSharedPreferences("folder_cam_v2_prefs", Context.MODE_PRIVATE)
             .edit().clear().commit()
@@ -46,11 +71,17 @@ class ExampleRobolectricTest {
         FolderRepository(context).getSdcardConfigFile().delete()
 
         val repo = FolderRepository(context)
-        assertTrue("By default no folders should exist", repo.folders.value.isEmpty())
-        assertNull(repo.getSelectedFolder())
+        assertEquals(1, repo.folders.value.size)
+        val inbox = repo.getInboxFolder()
+        assertEquals(MediaFolder.INBOX_FOLDER_ID, inbox.id)
+        assertEquals(MediaFolder.INBOX_DEFAULT_NAME, inbox.name)
+        assertEquals(MediaFolder.INBOX_DEFAULT_PATH, inbox.sdcardPath)
+        assertTrue(inbox.isInbox)
+        assertTrue(inbox.enableAudio && inbox.enablePhoto && inbox.enableVideo)
+        assertEquals(inbox.id, repo.getSelectedFolder()?.id)
         assertTrue(repo.isDarkTheme.value)
 
-        // Add folder and toggle theme to Light mode
+        // Add custom folder and toggle theme to Light mode
         val custom = repo.addFolder(
             name = "FieldRecordings",
             sdcardPath = "/sdcard/Music/FieldRecordings"
@@ -66,17 +97,23 @@ class ExampleRobolectricTest {
         val exportedJson = repo.toJsonString()
         assertTrue(exportedJson.contains("/sdcard/.foldercam"))
         assertTrue(exportedJson.contains("FieldRecordings"))
+        assertTrue(exportedJson.contains(MediaFolder.INBOX_DEFAULT_PATH))
 
-        repo.deleteFolder(custom.id)
+        // Custom folder can be deleted, but mandatory Inbox cannot
+        assertTrue(repo.deleteFolder(custom.id))
+        assertFalse(repo.deleteFolder(MediaFolder.INBOX_FOLDER_ID))
         repo.setDarkTheme(true)
-        assertTrue(repo.folders.value.isEmpty())
+        assertEquals(listOf(MediaFolder.INBOX_FOLDER_ID), repo.folders.value.map { it.id })
 
         // Restore from JSON
         assertTrue(repo.restoreFromJsonString(exportedJson))
-        assertEquals(1, repo.folders.value.size)
-        assertEquals("FieldRecordings", repo.folders.value.first().name)
-        assertEquals("/sdcard/Music/FieldRecordings", repo.folders.value.first().sdcardPath)
+        assertEquals(2, repo.folders.value.size)
+        assertEquals("FieldRecordings", repo.folders.value.last().name)
+        assertEquals("/sdcard/Music/FieldRecordings", repo.folders.value.last().sdcardPath)
         assertFalse(repo.isDarkTheme.value)
+
+        repo.getFallbackConfigFile().delete()
+        repo.getSdcardConfigFile().delete()
     }
 
     @Test
@@ -265,16 +302,16 @@ class ExampleRobolectricTest {
         val gamma = repo.addFolder("Gamma", "/sdcard/DCIM/Gamma")
         repo.selectFolder(beta.id)
 
-        assertEquals(listOf("Alpha", "Beta", "Gamma"), repo.folders.value.map { it.name })
-        assertTrue(repo.moveFolder(2, 0))
-        assertEquals(listOf("Gamma", "Alpha", "Beta"), repo.folders.value.map { it.name })
+        assertEquals(listOf("Inbox", "Alpha", "Beta", "Gamma"), repo.folders.value.map { it.name })
+        assertTrue(repo.moveFolder(3, 1))
+        assertEquals(listOf("Inbox", "Gamma", "Alpha", "Beta"), repo.folders.value.map { it.name })
         assertEquals(beta.id, repo.selectedFolderId.value)
 
         // Verify persisted order survives restore/reload
         val exported = repo.toJsonString()
         val repoReloaded = FolderRepository(context)
         assertTrue(repoReloaded.restoreFromJsonString(exported))
-        assertEquals(listOf("Gamma", "Alpha", "Beta"), repoReloaded.folders.value.map { it.name })
+        assertEquals(listOf("Inbox", "Gamma", "Alpha", "Beta"), repoReloaded.folders.value.map { it.name })
         assertEquals(beta.id, repoReloaded.selectedFolderId.value)
         assertFalse(repo.moveFolder(-1, 0))
         assertFalse(repo.moveFolder(1, 1))
@@ -405,24 +442,25 @@ class ExampleRobolectricTest {
         assertTrue(exportedJson.contains("\"enablePhoto\": false"))
         assertTrue(exportedJson.contains("\"enableVideo\": false"))
 
-        repo.deleteFolder(voiceOnly.id)
+        assertTrue(repo.deleteFolder(voiceOnly.id))
         assertTrue(repo.restoreFromJsonString(exportedJson))
-        val restored = repo.folders.value.first()
+        val restored = repo.folders.value.first { it.id == voiceOnly.id }
         assertTrue(restored.enableAudio)
         assertFalse(restored.enablePhoto)
         assertFalse(restored.enableVideo)
 
         // Toggle Video ON via setFolderModeEnabled
         repo.setFolderModeEnabled(restored.id, RecorderMode.VIDEO, true)
-        val toggled = repo.folders.value.first()
+        val toggled = repo.folders.value.first { it.id == voiceOnly.id }
         assertTrue(toggled.enableAudio)
         assertFalse(toggled.enablePhoto)
         assertTrue(toggled.enableVideo)
 
-        // Legacy JSON missing toggle keys defaults all 3 modes to true
+        // Legacy JSON missing toggle keys defaults all 3 modes to true and ensures Inbox is restored
         val legacyJson = """{"folders":[{"id":"legacy1","name":"Legacy","sdcardPath":"/sdcard/DCIM/Legacy"}],"selectedFolderId":"legacy1"}"""
         assertTrue(repo.restoreFromJsonString(legacyJson))
-        val legacy = repo.folders.value.first()
+        assertTrue(repo.folders.value.any { it.isInbox })
+        val legacy = repo.folders.value.first { it.id == "legacy1" }
         assertTrue(legacy.enableAudio)
         assertTrue(legacy.enablePhoto)
         assertTrue(legacy.enableVideo)
@@ -432,7 +470,7 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `viewmodel filters bottom bar folders by active mode and keeps per-mode selection`() {
+    fun `viewmodel filters bottom bar folders by active mode and always keeps inbox active`() {
         val app = ApplicationProvider.getApplicationContext<Application>()
         app.getSharedPreferences("folder_cam_v2_prefs", Context.MODE_PRIVATE)
             .edit().clear().commit()
@@ -440,6 +478,7 @@ class ExampleRobolectricTest {
         FolderRepository(app).getSdcardConfigFile().delete()
 
         val viewModel = FolderCamViewModel(app)
+        val inbox = viewModel.folderRepository.getInboxFolder()
         val audioFolder = viewModel.addFolder(
             name = "Voice",
             sdcardPath = "/sdcard/Recordings/Voice",
@@ -455,30 +494,211 @@ class ExampleRobolectricTest {
             enableVideo = false
         )
 
-        // Default mode is AUDIO -> only Voice appears and is selected
+        // Default mode is AUDIO -> Inbox + Voice appear (Voice auto-selected upon creation)
         assertEquals(RecorderMode.AUDIO, viewModel.recorderMode.value)
-        assertEquals(listOf(audioFolder.id), viewModel.foldersForCurrentMode.value.map { it.id })
+        assertEquals(listOf(inbox.id, audioFolder.id), viewModel.foldersForCurrentMode.value.map { it.id })
         assertEquals(audioFolder.id, viewModel.selectedFolder.value?.id)
 
-        // Switch to PHOTO -> only TripPhotos appears and is auto-selected
+        // Switch to PHOTO -> Inbox + TripPhotos appear
         viewModel.setRecorderMode(RecorderMode.PHOTO)
-        assertEquals(listOf(cameraFolder.id), viewModel.foldersForCurrentMode.value.map { it.id })
+        assertEquals(listOf(inbox.id, cameraFolder.id), viewModel.foldersForCurrentMode.value.map { it.id })
         assertEquals(cameraFolder.id, viewModel.selectedFolder.value?.id)
 
-        // Switch to VIDEO -> neither folder has Video enabled
+        // Switch to VIDEO -> mandatory Inbox remains enabled for Video
         viewModel.setRecorderMode(RecorderMode.VIDEO)
-        assertTrue(viewModel.foldersForCurrentMode.value.isEmpty())
-        assertNull(viewModel.selectedFolder.value)
-        // Gallery still remains accessible for configured folders
-        assertEquals(2, viewModel.folders.value.size)
+        assertEquals(listOf(inbox.id), viewModel.foldersForCurrentMode.value.map { it.id })
+        assertEquals(inbox.id, viewModel.selectedFolder.value?.id)
+        // Gallery still lists Inbox + both custom folders
+        assertEquals(3, viewModel.folders.value.size)
 
-        // Enable Video on TripPhotos -> immediately appears & auto-selects in Video mode
+        // Enable Video on TripPhotos -> immediately appears in Video mode
         viewModel.setFolderModeEnabled(cameraFolder.id, RecorderMode.VIDEO, true)
-        assertEquals(listOf(cameraFolder.id), viewModel.foldersForCurrentMode.value.map { it.id })
-        assertEquals(cameraFolder.id, viewModel.selectedFolder.value?.id)
+        assertEquals(listOf(inbox.id, cameraFolder.id), viewModel.foldersForCurrentMode.value.map { it.id })
 
         // Clean up
         viewModel.folderRepository.getFallbackConfigFile().delete()
         viewModel.folderRepository.getSdcardConfigFile().delete()
+    }
+
+    @Test
+    fun `mandatory inbox cannot disable modes or be deleted but allows editable path`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        context.getSharedPreferences("folder_cam_v2_prefs", Context.MODE_PRIVATE)
+            .edit().clear().commit()
+        FolderRepository(context).getFallbackConfigFile().delete()
+        FolderRepository(context).getSdcardConfigFile().delete()
+
+        val repo = FolderRepository(context)
+        val inbox = repo.getInboxFolder()
+        assertFalse(repo.deleteFolder(inbox.id))
+
+        // Attempt disabling Audio/Photo/Video on Inbox -> stays locked ON
+        repo.setFolderModeEnabled(inbox.id, RecorderMode.AUDIO, false)
+        repo.setFolderModeEnabled(inbox.id, RecorderMode.PHOTO, false)
+        repo.setFolderModeEnabled(inbox.id, RecorderMode.VIDEO, false)
+        val afterToggleAttempt = repo.getInboxFolder()
+        assertTrue(afterToggleAttempt.enableAudio)
+        assertTrue(afterToggleAttempt.enablePhoto)
+        assertTrue(afterToggleAttempt.enableVideo)
+
+        // Updating Inbox path works while keeping 3 modes locked ON
+        repo.updateFolder(
+            folderId = inbox.id,
+            name = "Custom Inbox",
+            sdcardPath = "/sdcard/Documents/CustomInbox",
+            colorHex = "#22C55E",
+            enableAudio = false,
+            enablePhoto = false,
+            enableVideo = false
+        )
+        val updatedInbox = repo.getInboxFolder()
+        assertEquals("Custom Inbox", updatedInbox.name)
+        assertEquals("/sdcard/Documents/CustomInbox", updatedInbox.sdcardPath)
+        assertTrue(updatedInbox.isInbox)
+        assertTrue(updatedInbox.enableAudio && updatedInbox.enablePhoto && updatedInbox.enableVideo)
+
+        repo.getFallbackConfigFile().delete()
+        repo.getSdcardConfigFile().delete()
+    }
+
+    @Test
+    fun `missing folder directories are auto-created on disk per folder config`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val storage = MediaStorageManager(context)
+        val uniqueSuffix = System.currentTimeMillis()
+        val missingFolder = MediaFolder(
+            id = "auto_create_$uniqueSuffix",
+            name = "AutoCreated",
+            sdcardPath = "/sdcard/FolderCamAutoTest_$uniqueSuffix"
+        )
+
+        val expectedSdcardDir = storage.toRealFile(missingFolder.sdcardPath)
+        expectedSdcardDir.deleteRecursively()
+        assertFalse(expectedSdcardDir.exists())
+
+        storage.ensureFolderDirectoryExists(missingFolder)
+        assertTrue(expectedSdcardDir.exists() && expectedSdcardDir.isDirectory)
+
+        expectedSdcardDir.deleteRecursively()
+    }
+
+    @Test
+    fun `video lens preference defaults to wide 1x and persists ultrawide in foldercam json`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        context.getSharedPreferences("folder_cam_v2_prefs", Context.MODE_PRIVATE)
+            .edit().clear().commit()
+        FolderRepository(context).getFallbackConfigFile().delete()
+        FolderRepository(context).getSdcardConfigFile().delete()
+
+        val repo = FolderRepository(context)
+        assertEquals(VideoLensPreference.WIDE, repo.videoLensPreference.value)
+
+        repo.setVideoLensPreference(VideoLensPreference.ULTRAWIDE)
+        val json = repo.toJsonString()
+        assertTrue(json.contains("\"videoLensPreference\""))
+        assertTrue(json.contains("\"ULTRAWIDE\""))
+
+        repo.setVideoLensPreference(VideoLensPreference.WIDE)
+        assertTrue(repo.restoreFromJsonString(json))
+        assertEquals(VideoLensPreference.ULTRAWIDE, repo.videoLensPreference.value)
+
+        repo.getFallbackConfigFile().delete()
+        repo.getSdcardConfigFile().delete()
+    }
+
+    @Test
+    fun `camera manager resolves ultrawide with fallback and configures 100-shot 88 percent burst`() {
+        assertEquals(88, CameraManager.BURST_JPEG_QUALITY)
+        assertEquals(100, CameraManager.MAX_BURST_PHOTOS)
+
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val cameraManager = CameraManager(context)
+
+        val lensesWithUw = listOf(
+            LensOption(id = "uw", label = "0.5x", name = "Ultra-Wide", targetZoomRatio = 0.5f),
+            LensOption(id = "1x", label = "1x", name = "Wide", targetZoomRatio = 1.0f),
+            LensOption(id = "2x", label = "2x", name = "2x", targetZoomRatio = 2.0f)
+        )
+        assertEquals("uw", cameraManager.resolveLensForPreference(lensesWithUw, VideoLensPreference.ULTRAWIDE).id)
+        assertEquals("1x", cameraManager.resolveLensForPreference(lensesWithUw, VideoLensPreference.WIDE).id)
+
+        // Device without ultra-wide lens falls back gracefully to widest available lens ("1x")
+        val lensesWithoutUw = listOf(
+            LensOption(id = "1x", label = "1x", name = "Wide", targetZoomRatio = 1.0f),
+            LensOption(id = "2x", label = "2x", name = "2x", targetZoomRatio = 2.0f)
+        )
+        assertEquals("1x", cameraManager.resolveLensForPreference(lensesWithoutUw, VideoLensPreference.ULTRAWIDE).id)
+
+        cameraManager.release()
+    }
+
+    @Test
+    fun `dnd controller fails safely without policy access and builds policy settings intent`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val dndController = DndController(context)
+
+        assertFalse(dndController.hasPolicyAccess())
+        assertFalse(dndController.enableDndForRecording())
+        assertFalse(dndController.isDndActiveByApp())
+        assertFalse(dndController.restoreDndAfterRecording())
+
+        val intent = DndController.createPolicyAccessSettingsIntent()
+        assertEquals(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS, intent.action)
+    }
+
+    @Test
+    fun `widget foreground service intents carry distinct video and audio actions`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val videoIntent = RecordingForegroundService.createWidgetVideoIntent(context)
+        val audioIntent = RecordingForegroundService.createWidgetAudioIntent(context)
+
+        assertEquals(RecordingForegroundService.ACTION_WIDGET_TOGGLE_VIDEO, videoIntent.action)
+        assertEquals(RecordingForegroundService.ACTION_WIDGET_TOGGLE_AUDIO, audioIntent.action)
+    }
+
+    @Test
+    fun `burst buffer manager enqueues jpeg frames in RAM and drains to destination folder`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val storage = MediaStorageManager(context)
+        val testScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val drainedResults = CopyOnWriteArrayList<String>()
+        val errors = CopyOnWriteArrayList<String>()
+
+        val bufferManager = BurstBufferManager(
+            mediaStorageManager = storage,
+            scope = testScope,
+            onFrameDrained = { _, result -> drainedResults.add(result.destinationPath) },
+            onFrameFailed = { err -> errors.add(err) }
+        )
+
+        assertTrue(bufferManager.getRamBudgetBytes() >= 32L * 1024L * 1024L)
+
+        val uniqueSuffix = System.currentTimeMillis()
+        val targetFolder = MediaFolder(
+            id = "ram_burst_$uniqueSuffix",
+            name = "RamBurst",
+            sdcardPath = "/sdcard/DCIM/RamBurst_$uniqueSuffix"
+        )
+        storage.ensureFolderDirectoryExists(targetFolder)
+
+        val sampleJpeg = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0x01, 0x02, 0xFF.toByte(), 0xD9.toByte())
+        repeat(12) {
+            assertTrue(bufferManager.enqueueCapturedBytes(targetFolder, sampleJpeg))
+        }
+
+        val deadline = System.currentTimeMillis() + 4000L
+        while (System.currentTimeMillis() < deadline && drainedResults.size < 12) {
+            Thread.sleep(20)
+        }
+
+        assertEquals(12, drainedResults.size)
+        assertTrue(errors.isEmpty())
+        assertEquals(0, bufferManager.getPendingCount())
+        assertEquals(0L, bufferManager.getRamBufferedBytes())
+        val realDestDir = storage.toRealFile(targetFolder.sdcardPath)
+        assertNotNull(realDestDir.listFiles()?.takeIf { it.size == 12 })
+
+        realDestDir.deleteRecursively()
+        testScope.cancel()
     }
 }

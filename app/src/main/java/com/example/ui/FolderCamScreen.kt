@@ -94,8 +94,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.model.CaptureState
-import com.example.model.MediaType
 import com.example.model.RecorderMode
+import com.example.system.DndController
 import com.example.ui.components.DualBottomBars
 import com.example.ui.components.FolderSettingsDialog
 import com.example.ui.components.GalleryBottomSheet
@@ -131,6 +131,9 @@ fun FolderCamScreen(
     val needsAllFilesAccessBanner by viewModel.needsAllFilesAccessBanner.collectAsState()
     val photoFeedback by viewModel.photoFeedback.collectAsState()
     val captureOrientation by viewModel.captureOrientation.collectAsState()
+    val videoLensPreference by viewModel.videoLensPreference.collectAsState()
+    val dndPolicyGranted by viewModel.dndPolicyGranted.collectAsState()
+    val isDndActive by viewModel.isDndActive.collectAsState()
 
     var hasCameraPermission by remember {
         mutableStateOf(
@@ -437,22 +440,15 @@ fun FolderCamScreen(
                 },
                 onRecordVideoClick = {
                     if (captureState == CaptureState.RECORDING_VIDEO) {
-                        cameraManager.stopVideoRecording()
+                        viewModel.stopVideoRecording()
                     } else if (captureState == CaptureState.IDLE) {
-                        val file = viewModel.prepareOutputFile(MediaType.VIDEO) ?: return@DualBottomBars
-                        cameraManager.startVideoRecording(
-                            outputFile = file,
-                            enableAudio = hasAudioPermission,
-                            onVideoStarted = {
-                                viewModel.onVideoRecordingStarted()
-                            },
-                            onVideoSaved = { savedFile ->
-                                viewModel.onVideoSaved(savedFile)
-                            },
-                            onError = { err ->
-                                viewModel.onVideoError(err)
-                            }
-                        )
+                        if (!hasCameraPermission) {
+                            permissionLauncher.launch(
+                                arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
+                            )
+                        } else {
+                            viewModel.startVideoRecording(enableAudio = hasAudioPermission)
+                        }
                     }
                 },
                 onRecordAudioClick = {
@@ -529,6 +525,8 @@ fun FolderCamScreen(
                             amplitudes = audioStatus.amplitudes,
                             currentDecibels = audioStatus.currentDecibels,
                             targetFolder = selectedFolder,
+                            isDndActive = isDndActive,
+                            isMicPreemptedByCall = audioStatus.isMicPreemptedByCall,
                             onOpenFolderSettings = { viewModel.openSettings() },
                             modifier = Modifier.fillMaxSize()
                         )
@@ -688,15 +686,22 @@ fun FolderCamScreen(
                                     label = "burst_shot_count"
                                 ) { count ->
                                     Text(
-                                        text = "#$count",
+                                        text = if (photoFeedback.isBurstActive) {
+                                            "#$count/100"
+                                        } else {
+                                            "#$count"
+                                        },
                                         style = MaterialTheme.typography.titleSmall,
                                         fontFamily = FontFamily.Monospace,
                                         fontWeight = FontWeight.ExtraBold
                                     )
                                 }
                                 if (photoFeedback.inFlightCounter > 0) {
+                                    val ramInfo = if (photoFeedback.bufferedRamCount > 0) {
+                                        " · RAM ${photoFeedback.bufferedRamCount}"
+                                    } else ""
                                     Text(
-                                        text = "· Saving ${photoFeedback.inFlightCounter}",
+                                        text = "· Saving ${photoFeedback.inFlightCounter}$ramInfo",
                                         style = MaterialTheme.typography.labelMedium,
                                         color = contentColor.copy(alpha = 0.85f)
                                     )
@@ -780,9 +785,24 @@ fun FolderCamScreen(
             folderCounts = folderCounts,
             isDarkTheme = isDarkTheme,
             hasAllFilesAccess = hasAllFilesAccess,
+            videoLensPreference = videoLensPreference,
+            dndPolicyGranted = dndPolicyGranted,
             onRequestAllFilesAccess = { launchAllFilesAccessSettings(context) },
             onToggleDarkTheme = { isDark ->
                 viewModel.setDarkTheme(isDark)
+            },
+            onSetVideoLensPreference = { pref ->
+                viewModel.setVideoLensPreference(pref)
+            },
+            onRequestDndAccess = {
+                try {
+                    context.startActivity(DndController.createPolicyAccessSettingsIntent())
+                } catch (e: Exception) {
+                    viewModel.showToast("Open Settings -> Notifications -> Do Not Disturb access")
+                }
+            },
+            onPinQuickWidget = {
+                viewModel.pinQuickWidgetToHomeScreen()
             },
             onRestoreFromSdcardFile = {
                 viewModel.restoreSettingsFromSdcard()

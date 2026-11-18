@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">FolderCam</string>
+    <string name="widget_quick_record_label">FolderCam Quick</string>
+    <string name="widget_quick_record_description">1x1 dual quick-record widget: background video on top, DND audio on bottom.</string>
 </resources>

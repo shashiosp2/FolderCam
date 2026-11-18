@@ -2,10 +2,13 @@ package com.example.data
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.net.Uri
 import android.os.Environment
+import android.provider.DocumentsContract
 import com.example.model.CaptureOrientation
 import com.example.model.MediaFolder
 import com.example.model.RecorderMode
+import com.example.model.VideoLensPreference
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -32,6 +35,9 @@ class FolderRepository(private val context: Context) {
 
     private val _captureOrientation = MutableStateFlow(CaptureOrientation.AUTO)
     val captureOrientation: StateFlow<CaptureOrientation> = _captureOrientation.asStateFlow()
+
+    private val _videoLensPreference = MutableStateFlow(VideoLensPreference.WIDE)
+    val videoLensPreference: StateFlow<VideoLensPreference> = _videoLensPreference.asStateFlow()
 
     init {
         loadSettings()
@@ -64,7 +70,7 @@ class FolderRepository(private val context: Context) {
             try {
                 val content = sdcardFile.readText()
                 if (content.isNotBlank() && applySettingsFromJson(content, syncToDisk = false)) {
-                    // Sync into prefs & fallback mirror
+                    ensureAllFolderDirectoriesExist(_folders.value)
                     saveSettingsToInternalAndSdcard(writeSdcard = false)
                     return
                 }
@@ -79,6 +85,7 @@ class FolderRepository(private val context: Context) {
             try {
                 val content = fallbackFile.readText()
                 if (content.isNotBlank() && applySettingsFromJson(content, syncToDisk = false)) {
+                    ensureAllFolderDirectoriesExist(_folders.value)
                     return
                 }
             } catch (e: Exception) {
@@ -90,6 +97,7 @@ class FolderRepository(private val context: Context) {
         val savedJson = prefs.getString("foldercam_settings_json", null)
         if (!savedJson.isNullOrBlank()) {
             if (applySettingsFromJson(savedJson, syncToDisk = false)) {
+                ensureAllFolderDirectoriesExist(_folders.value)
                 return
             }
         }
@@ -98,15 +106,18 @@ class FolderRepository(private val context: Context) {
         val legacyFoldersJson = prefs.getString("folders_v2_json", null)
         if (!legacyFoldersJson.isNullOrBlank()) {
             try {
-                val loadedList = parseFoldersArray(JSONArray(legacyFoldersJson))
+                val loadedList = ensureInboxFolderPresent(parseFoldersArray(JSONArray(legacyFoldersJson)))
                 _folders.value = loadedList
                 val savedSelectedId = prefs.getString("selected_folder_v2_id", null)
                 _selectedFolderId.value = when {
-                    loadedList.isEmpty() -> null
                     savedSelectedId != null && loadedList.any { it.id == savedSelectedId } -> savedSelectedId
                     else -> loadedList.first().id
                 }
                 _isDarkTheme.value = prefs.getBoolean("is_dark_theme", true)
+                _videoLensPreference.value = VideoLensPreference.fromStorageKey(
+                    prefs.getString("video_lens_preference", VideoLensPreference.WIDE.storageKey)
+                )
+                ensureAllFolderDirectoriesExist(loadedList)
                 saveAllSettings()
                 return
             } catch (e: Exception) {
@@ -114,13 +125,19 @@ class FolderRepository(private val context: Context) {
             }
         }
 
-        // By default, no folders exist until specified by the user
-        _folders.value = emptyList()
-        _selectedFolderId.value = null
+        // Fresh default: Mandatory Inbox folder (/sdcard/inbox) enabled for Audio, Photos, & Video
+        val defaultFolders = ensureInboxFolderPresent(emptyList())
+        _folders.value = defaultFolders
+        _selectedFolderId.value = defaultFolders.first().id
         _isDarkTheme.value = true
         _captureOrientation.value = CaptureOrientation.fromStorageKey(
             prefs.getString("capture_orientation", CaptureOrientation.AUTO.storageKey)
         )
+        _videoLensPreference.value = VideoLensPreference.fromStorageKey(
+            prefs.getString("video_lens_preference", VideoLensPreference.WIDE.storageKey)
+        )
+        ensureAllFolderDirectoriesExist(defaultFolders)
+        saveAllSettings()
     }
 
     fun setDarkTheme(isDark: Boolean) {
@@ -139,11 +156,30 @@ class FolderRepository(private val context: Context) {
         saveAllSettings()
     }
 
+    fun setVideoLensPreference(preference: VideoLensPreference) {
+        if (_videoLensPreference.value == preference) return
+        _videoLensPreference.value = preference
+        saveAllSettings()
+    }
+
     fun selectFolder(folderId: String) {
         if (_folders.value.any { it.id == folderId }) {
             _selectedFolderId.value = folderId
             saveAllSettings()
         }
+    }
+
+    fun getInboxFolder(): MediaFolder {
+        val current = _folders.value
+        val existing = current.find { it.isInbox }
+        if (existing != null) return existing
+
+        val ensured = ensureInboxFolderPresent(current)
+        _folders.value = ensured
+        val inbox = ensured.first { it.isInbox }
+        ensureFolderDirectoryExists(inbox)
+        saveAllSettings()
+        return inbox
     }
 
     fun addFolder(
@@ -166,12 +202,14 @@ class FolderRepository(private val context: Context) {
             enableAudio = enableAudio,
             enablePhoto = enablePhoto,
             enableVideo = enableVideo,
+            isDefaultInbox = false,
             colorHex = colorHex,
             iconName = "Folder"
         )
-        val updatedList = _folders.value + newFolder
+        val updatedList = ensureInboxFolderPresent(_folders.value + newFolder)
         _folders.value = updatedList
         _selectedFolderId.value = newFolder.id
+        ensureFolderDirectoryExists(newFolder)
         saveAllSettings()
         return newFolder
     }
@@ -186,39 +224,54 @@ class FolderRepository(private val context: Context) {
         enablePhoto: Boolean? = null,
         enableVideo: Boolean? = null
     ) {
-        val cleanName = name.trim().ifEmpty { "Folder" }
-        val normalizedPath = normalizeSdcardPath(sdcardPath, cleanName)
         val updatedList = _folders.value.map { existing ->
             if (existing.id == folderId) {
+                val cleanName = if (existing.isInbox) {
+                    name.trim().ifEmpty { MediaFolder.INBOX_DEFAULT_NAME }
+                } else {
+                    name.trim().ifEmpty { "Folder" }
+                }
+                val normalizedPath = normalizeSdcardPath(sdcardPath, cleanName)
                 val pathChanged = existing.sdcardPath != normalizedPath
-                existing.copy(
+                val resolvedTreeUri = when {
+                    treeUri != null -> treeUri
+                    pathChanged -> null
+                    else -> existing.treeUri
+                }
+                val updated = existing.copy(
                     name = cleanName,
                     sdcardPath = normalizedPath,
                     colorHex = colorHex,
-                    treeUri = when {
-                        treeUri != null -> treeUri
-                        pathChanged -> null
-                        else -> existing.treeUri
-                    },
-                    enableAudio = enableAudio ?: existing.enableAudio,
-                    enablePhoto = enablePhoto ?: existing.enablePhoto,
-                    enableVideo = enableVideo ?: existing.enableVideo
+                    treeUri = resolvedTreeUri,
+                    // Mandatory Inbox stays permanently locked ON for all three modes
+                    enableAudio = if (existing.isInbox) true else (enableAudio ?: existing.enableAudio),
+                    enablePhoto = if (existing.isInbox) true else (enablePhoto ?: existing.enablePhoto),
+                    enableVideo = if (existing.isInbox) true else (enableVideo ?: existing.enableVideo),
+                    isDefaultInbox = existing.isInbox
                 )
+                ensureFolderDirectoryExists(updated)
+                updated
             } else {
                 existing
             }
         }
-        _folders.value = updatedList
+        val normalizedList = ensureInboxFolderPresent(updatedList)
+        _folders.value = normalizedList
         saveAllSettings()
     }
 
     fun setFolderModeEnabled(folderId: String, mode: RecorderMode, enabled: Boolean) {
         val updatedList = _folders.value.map { existing ->
             if (existing.id == folderId) {
-                when (mode) {
-                    RecorderMode.AUDIO -> existing.copy(enableAudio = enabled)
-                    RecorderMode.PHOTO -> existing.copy(enablePhoto = enabled)
-                    RecorderMode.VIDEO -> existing.copy(enableVideo = enabled)
+                if (existing.isInbox) {
+                    // Inbox is mandatory for Audio, Photo, and Video and cannot disable any mode
+                    existing.copy(enableAudio = true, enablePhoto = true, enableVideo = true, isDefaultInbox = true)
+                } else {
+                    when (mode) {
+                        RecorderMode.AUDIO -> existing.copy(enableAudio = enabled)
+                        RecorderMode.PHOTO -> existing.copy(enablePhoto = enabled)
+                        RecorderMode.VIDEO -> existing.copy(enableVideo = enabled)
+                    }
                 }
             } else {
                 existing
@@ -230,10 +283,14 @@ class FolderRepository(private val context: Context) {
 
     fun deleteFolder(folderId: String): Boolean {
         val currentList = _folders.value
-        val updatedList = currentList.filter { it.id != folderId }
+        val target = currentList.find { it.id == folderId } ?: return false
+        if (target.isInbox) {
+            return false
+        }
+        val updatedList = ensureInboxFolderPresent(currentList.filter { it.id != folderId })
         _folders.value = updatedList
 
-        if (_selectedFolderId.value == folderId) {
+        if (_selectedFolderId.value == folderId || updatedList.none { it.id == _selectedFolderId.value }) {
             _selectedFolderId.value = updatedList.firstOrNull()?.id
         }
         saveAllSettings()
@@ -294,7 +351,8 @@ class FolderRepository(private val context: Context) {
         val sdcardFile = getSdcardConfigFile()
         if (_folders.value.isEmpty() && sdcardFile.exists() && sdcardFile.canRead()) {
             restoreFromSdcardConfigFile()
-        } else if (_folders.value.isNotEmpty()) {
+        } else {
+            ensureAllFolderDirectoriesExist(_folders.value)
             saveSettingsToInternalAndSdcard(writeSdcard = true)
         }
     }
@@ -311,26 +369,28 @@ class FolderRepository(private val context: Context) {
         return try {
             val trimmed = jsonString.trim()
             if (trimmed.startsWith("[")) {
-                // Also support plain JSON array of folders
-                val loadedList = parseFoldersArray(JSONArray(trimmed))
+                val loadedList = ensureInboxFolderPresent(parseFoldersArray(JSONArray(trimmed)))
                 _folders.value = loadedList
                 _selectedFolderId.value = loadedList.firstOrNull()?.id
+                ensureAllFolderDirectoriesExist(loadedList)
             } else {
                 val root = JSONObject(trimmed)
                 val isDark = root.optBoolean("isDarkTheme", true)
                 val orientationKey = root.optString("captureOrientation", CaptureOrientation.AUTO.storageKey)
+                val lensKey = root.optString("videoLensPreference", VideoLensPreference.WIDE.storageKey)
                 val foldersArray = root.optJSONArray("folders") ?: JSONArray()
-                val loadedList = parseFoldersArray(foldersArray)
+                val loadedList = ensureInboxFolderPresent(parseFoldersArray(foldersArray))
                 val savedSelectedId = root.optString("selectedFolderId", "").ifEmpty { null }
 
                 _isDarkTheme.value = isDark
                 _captureOrientation.value = CaptureOrientation.fromStorageKey(orientationKey)
+                _videoLensPreference.value = VideoLensPreference.fromStorageKey(lensKey)
                 _folders.value = loadedList
                 _selectedFolderId.value = when {
-                    loadedList.isEmpty() -> null
                     savedSelectedId != null && loadedList.any { it.id == savedSelectedId } -> savedSelectedId
                     else -> loadedList.first().id
                 }
+                ensureAllFolderDirectoriesExist(loadedList)
             }
             if (syncToDisk) {
                 saveAllSettings()
@@ -346,26 +406,153 @@ class FolderRepository(private val context: Context) {
         val loadedList = mutableListOf<MediaFolder>()
         for (i in 0 until array.length()) {
             val obj = array.getJSONObject(i)
-            val name = obj.optString("name", "Folder")
-            val rawSdcardPath = obj.optString("sdcardPath", "/sdcard/$name")
+            val id = obj.optString("id", "folder_${System.currentTimeMillis()}_$i")
+            val isInboxFlag = obj.optBoolean("isDefaultInbox", false) || id == MediaFolder.INBOX_FOLDER_ID
+            val defaultFallbackName = if (isInboxFlag) MediaFolder.INBOX_DEFAULT_NAME else "Folder"
+            val name = obj.optString("name", defaultFallbackName).ifBlank { defaultFallbackName }
+            val defaultRawPath = if (isInboxFlag) MediaFolder.INBOX_DEFAULT_PATH else "/sdcard/$name"
+            val rawSdcardPath = obj.optString("sdcardPath", defaultRawPath).ifBlank { defaultRawPath }
             val basePath = normalizeSdcardPath(rawSdcardPath, name)
             val baseTreeUri = obj.optString("treeUri", "").ifEmpty { null }
             loadedList.add(
                 MediaFolder(
-                    id = obj.optString("id", "folder_${System.currentTimeMillis()}_$i"),
+                    id = if (isInboxFlag) MediaFolder.INBOX_FOLDER_ID else id,
                     name = name,
                     sdcardPath = basePath,
                     treeUri = baseTreeUri,
-                    enableAudio = obj.optBoolean("enableAudio", true),
-                    enablePhoto = obj.optBoolean("enablePhoto", true),
-                    enableVideo = obj.optBoolean("enableVideo", true),
+                    enableAudio = if (isInboxFlag) true else obj.optBoolean("enableAudio", true),
+                    enablePhoto = if (isInboxFlag) true else obj.optBoolean("enablePhoto", true),
+                    enableVideo = if (isInboxFlag) true else obj.optBoolean("enableVideo", true),
+                    isDefaultInbox = isInboxFlag,
                     colorHex = obj.optString("colorHex", "#38BDF8"),
-                    iconName = obj.optString("iconName", "Folder"),
+                    iconName = obj.optString("iconName", if (isInboxFlag) "Inbox" else "Folder"),
                     createdAt = obj.optLong("createdAt", System.currentTimeMillis())
                 )
             )
         }
         return loadedList
+    }
+
+    private fun ensureInboxFolderPresent(list: List<MediaFolder>): List<MediaFolder> {
+        val existingInbox = list.firstOrNull { it.isInbox }
+        val normalizedInbox = if (existingInbox != null) {
+            existingInbox.copy(
+                id = MediaFolder.INBOX_FOLDER_ID,
+                name = existingInbox.name.ifBlank { MediaFolder.INBOX_DEFAULT_NAME },
+                sdcardPath = existingInbox.sdcardPath.ifBlank { MediaFolder.INBOX_DEFAULT_PATH },
+                enableAudio = true,
+                enablePhoto = true,
+                enableVideo = true,
+                isDefaultInbox = true
+            )
+        } else {
+            MediaFolder.createDefaultInbox()
+        }
+
+        val others = list.filterNot { it.isInbox }
+        // Preserve existing position if Inbox was already in the list, otherwise place Inbox first
+        return if (existingInbox != null) {
+            list.map { if (it.isInbox) normalizedInbox else it }
+                .distinctBy { it.id }
+        } else {
+            listOf(normalizedInbox) + others
+        }
+    }
+
+    fun ensureAllFolderDirectoriesExist(folders: List<MediaFolder> = _folders.value) {
+        folders.forEach { folder ->
+            ensureFolderDirectoryExists(folder)
+        }
+    }
+
+    fun ensureFolderDirectoryExists(folder: MediaFolder) {
+        try {
+            val relative = folder.sdcardPath.removePrefix("/sdcard").trimStart('/')
+            val root = try {
+                Environment.getExternalStorageDirectory()
+            } catch (e: Exception) {
+                File("/sdcard")
+            }
+            val realDir = if (relative.isEmpty()) root else File(root, relative)
+            if (!realDir.exists()) {
+                realDir.mkdirs()
+            }
+        } catch (e: Exception) {
+            // Ignore if OS blocks direct /sdcard creation before All Files Access
+        }
+
+        try {
+            val base = context.getExternalFilesDir(null)?.let { File(it, "FolderCam") }
+                ?: File(context.filesDir, "FolderCam")
+            val relative = folder.sdcardPath.removePrefix("/sdcard").trimStart('/')
+            val safeRelative = relative.ifEmpty {
+                folder.name.replace("[^a-zA-Z0-9_-]".toRegex(), "_")
+            }
+            val mirrorDir = File(base, safeRelative)
+            if (!mirrorDir.exists()) {
+                mirrorDir.mkdirs()
+            }
+        } catch (e: Exception) {
+            // Ignore
+        }
+
+        folder.treeUri?.let { uriStr ->
+            try {
+                val treeUri = Uri.parse(uriStr)
+                val docId = DocumentsContract.getTreeDocumentId(treeUri)
+                val parts = docId.split(":")
+                val treeRel = if (parts.size > 1) parts[1].trim('/') else docId.trim('/')
+                val treeBasePath = if (treeRel.isEmpty()) "/sdcard" else "/sdcard/$treeRel"
+                val cleanTarget = normalizeSdcardPath(folder.sdcardPath, folder.name).trimEnd('/')
+                if (cleanTarget.startsWith("$treeBasePath/")) {
+                    var currentDocId = docId
+                    var currentDocUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, currentDocId)
+                    val subSegments = cleanTarget.removePrefix("$treeBasePath/").split('/').filter { it.isNotEmpty() }
+                    for (segment in subSegments) {
+                        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, currentDocId)
+                        var childId: String? = null
+                        context.contentResolver.query(
+                            childrenUri,
+                            arrayOf(
+                                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                                DocumentsContract.Document.COLUMN_MIME_TYPE
+                            ),
+                            null,
+                            null,
+                            null
+                        )?.use { cursor ->
+                            val idIdx = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                            val nameIdx = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                            val mimeIdx = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                            while (cursor.moveToNext()) {
+                                val n = if (nameIdx >= 0) cursor.getString(nameIdx) else null
+                                val m = if (mimeIdx >= 0) cursor.getString(mimeIdx) else null
+                                if (n == segment && m == DocumentsContract.Document.MIME_TYPE_DIR && idIdx >= 0) {
+                                    childId = cursor.getString(idIdx)
+                                    break
+                                }
+                            }
+                        }
+                        if (childId != null) {
+                            currentDocId = childId!!
+                            currentDocUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, currentDocId)
+                        } else {
+                            val created = DocumentsContract.createDocument(
+                                context.contentResolver,
+                                currentDocUri,
+                                DocumentsContract.Document.MIME_TYPE_DIR,
+                                segment
+                            ) ?: break
+                            currentDocId = DocumentsContract.getDocumentId(created)
+                            currentDocUri = created
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                // Ignore if SAF permission revoked or unavailable in unit tests
+            }
+        }
     }
 
     fun toJsonString(): String {
@@ -374,6 +561,7 @@ class FolderRepository(private val context: Context) {
         root.put("configPath", "/sdcard/.foldercam")
         root.put("isDarkTheme", _isDarkTheme.value)
         root.put("captureOrientation", _captureOrientation.value.storageKey)
+        root.put("videoLensPreference", _videoLensPreference.value.storageKey)
         root.put("photoResolution", "12MP")
         root.put("videoResolution", "4K 30fps")
         root.put("selectedFolderId", _selectedFolderId.value ?: "")
@@ -385,9 +573,10 @@ class FolderRepository(private val context: Context) {
                 put("name", item.name)
                 put("sdcardPath", item.sdcardPath)
                 put("treeUri", item.treeUri ?: "")
-                put("enableAudio", item.enableAudio)
-                put("enablePhoto", item.enablePhoto)
-                put("enableVideo", item.enableVideo)
+                put("enableAudio", if (item.isInbox) true else item.enableAudio)
+                put("enablePhoto", if (item.isInbox) true else item.enablePhoto)
+                put("enableVideo", if (item.isInbox) true else item.enableVideo)
+                put("isDefaultInbox", item.isInbox)
                 put("colorHex", item.colorHex)
                 put("iconName", item.iconName)
                 put("createdAt", item.createdAt)
@@ -410,6 +599,7 @@ class FolderRepository(private val context: Context) {
             .putString("foldercam_settings_json", jsonText)
             .putBoolean("is_dark_theme", _isDarkTheme.value)
             .putString("capture_orientation", _captureOrientation.value.storageKey)
+            .putString("video_lens_preference", _videoLensPreference.value.storageKey)
             .putString("selected_folder_v2_id", _selectedFolderId.value)
             .apply()
 

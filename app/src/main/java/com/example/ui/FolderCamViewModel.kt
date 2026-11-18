@@ -15,38 +15,54 @@ import com.example.model.MediaItem
 import com.example.model.MediaType
 import com.example.model.PhotoCaptureFeedbackState
 import com.example.model.RecorderMode
+import com.example.model.RecordingOrigin
 import com.example.model.RecordingStatus
-import com.example.service.RecordingForegroundService
-import com.example.service.RecordingServiceBridge
+import com.example.model.VideoLensPreference
+import com.example.service.RecordingCoordinator
+import com.example.widget.FolderCamQuickWidget
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.File
 
 class FolderCamViewModel(application: Application) : AndroidViewModel(application) {
 
     private val appContext = application.applicationContext
-    val folderRepository = FolderRepository(appContext)
-    val mediaStorageManager = MediaStorageManager(appContext)
-    val audioRecorderManager = AudioRecorderManager(appContext)
-    val cameraManager = CameraManager(appContext)
+    val coordinator: RecordingCoordinator = RecordingCoordinator.getInstance(appContext)
+    val folderRepository: FolderRepository = coordinator.folderRepository
+    val mediaStorageManager: MediaStorageManager = coordinator.mediaStorageManager
+    val audioRecorderManager: AudioRecorderManager = coordinator.audioRecorderManager
+    val cameraManager: CameraManager = coordinator.cameraManager
 
     val folders: StateFlow<List<MediaFolder>> = folderRepository.folders
     val selectedFolderId: StateFlow<String?> = folderRepository.selectedFolderId
     val isDarkTheme: StateFlow<Boolean> = folderRepository.isDarkTheme
     val captureOrientation: StateFlow<CaptureOrientation> = folderRepository.captureOrientation
+    val videoLensPreference: StateFlow<VideoLensPreference> = folderRepository.videoLensPreference
+
+    val captureState: StateFlow<CaptureState> = coordinator.captureState
+    val recordingOrigin: StateFlow<RecordingOrigin?> = coordinator.recordingOrigin
+    val activeRecordingFolder: StateFlow<MediaFolder?> = coordinator.activeRecordingFolder
+    val audioStatus: StateFlow<RecordingStatus> = coordinator.audioStatus
+    val videoDurationSeconds: StateFlow<Int> = coordinator.videoDurationSeconds
+    val isDndActive: StateFlow<Boolean> = coordinator.isDndActive
+    val dndPolicyGranted: StateFlow<Boolean> = coordinator.dndPolicyGranted
+    val hasAllFilesAccess: StateFlow<Boolean> = coordinator.hasAllFilesAccess
+    val needsAllFilesAccessBanner: StateFlow<Boolean> = coordinator.needsAllFilesAccessBanner
+    val toastMessage: StateFlow<String?> = coordinator.toastMessage
+    val photoFeedback: StateFlow<PhotoCaptureFeedbackState> = coordinator.photoFeedback
 
     // Default mode is AUDIO (index 0), then PHOTO (index 1), then VIDEO (index 2)
-    private val _recorderMode = MutableStateFlow(RecorderMode.AUDIO)
+    private val _recorderMode = MutableStateFlow(
+        when (coordinator.captureState.value) {
+            CaptureState.RECORDING_VIDEO -> RecorderMode.VIDEO
+            CaptureState.RECORDING_AUDIO -> RecorderMode.AUDIO
+            CaptureState.IDLE -> RecorderMode.AUDIO
+        }
+    )
     val recorderMode: StateFlow<RecorderMode> = _recorderMode.asStateFlow()
 
     private val _selectedFolderIdByMode = MutableStateFlow<Map<RecorderMode, String>>(emptyMap())
@@ -60,6 +76,59 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
 
     private val _galleryFolder = MutableStateFlow<MediaFolder?>(null)
     val galleryFolder: StateFlow<MediaFolder?> = _galleryFolder.asStateFlow()
+
+    private val _folderCounts = MutableStateFlow<Map<String, Int>>(emptyMap())
+    val folderCounts: StateFlow<Map<String, Int>> = _folderCounts.asStateFlow()
+
+    private val _currentFolderMedia = MutableStateFlow<List<MediaItem>>(emptyList())
+    val currentFolderMedia: StateFlow<List<MediaItem>> = _currentFolderMedia.asStateFlow()
+
+    private val _isSettingsOpen = MutableStateFlow(false)
+    val isSettingsOpen: StateFlow<Boolean> = _isSettingsOpen.asStateFlow()
+
+    private val _isGalleryOpen = MutableStateFlow(false)
+    val isGalleryOpen: StateFlow<Boolean> = _isGalleryOpen.asStateFlow()
+
+    init {
+        recomputeModeFolderState()
+
+        viewModelScope.launch {
+            galleryFolder.collect {
+                refreshFolderMedia()
+            }
+        }
+        viewModelScope.launch {
+            folders.collect {
+                recomputeModeFolderState()
+                refreshAllFolderCounts()
+            }
+        }
+        viewModelScope.launch {
+            coordinator.mediaChangeCounter.collect {
+                refreshFolderMedia()
+                refreshAllFolderCounts()
+            }
+        }
+        viewModelScope.launch {
+            coordinator.captureState.collect { state ->
+                when (state) {
+                    CaptureState.RECORDING_VIDEO -> {
+                        if (_recorderMode.value != RecorderMode.VIDEO) {
+                            _recorderMode.value = RecorderMode.VIDEO
+                            recomputeModeFolderState()
+                        }
+                    }
+                    CaptureState.RECORDING_AUDIO -> {
+                        if (_recorderMode.value != RecorderMode.AUDIO) {
+                            _recorderMode.value = RecorderMode.AUDIO
+                            recomputeModeFolderState()
+                        }
+                    }
+                    CaptureState.IDLE -> Unit
+                }
+            }
+        }
+    }
 
     private fun recomputeModeFolderState() {
         val list = folders.value
@@ -88,84 +157,32 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
 
     private fun activeFolder(): MediaFolder? = selectedFolder.value
 
-    private val _captureState = MutableStateFlow(CaptureState.IDLE)
-    val captureState: StateFlow<CaptureState> = _captureState.asStateFlow()
-
-    val audioStatus: StateFlow<RecordingStatus> = audioRecorderManager.status
-
-    private val _videoDurationSeconds = MutableStateFlow(0)
-    val videoDurationSeconds: StateFlow<Int> = _videoDurationSeconds.asStateFlow()
-
-    private var videoTimerJob: Job? = null
-
-    private val _folderCounts = MutableStateFlow<Map<String, Int>>(emptyMap())
-    val folderCounts: StateFlow<Map<String, Int>> = _folderCounts.asStateFlow()
-
-    private val _currentFolderMedia = MutableStateFlow<List<MediaItem>>(emptyList())
-    val currentFolderMedia: StateFlow<List<MediaItem>> = _currentFolderMedia.asStateFlow()
-
-    private val _toastMessage = MutableStateFlow<String?>(null)
-    val toastMessage: StateFlow<String?> = _toastMessage.asStateFlow()
-
-    private val _isSettingsOpen = MutableStateFlow(false)
-    val isSettingsOpen: StateFlow<Boolean> = _isSettingsOpen.asStateFlow()
-
-    private val _isGalleryOpen = MutableStateFlow(false)
-    val isGalleryOpen: StateFlow<Boolean> = _isGalleryOpen.asStateFlow()
-
-    private val _hasAllFilesAccess = MutableStateFlow(mediaStorageManager.hasAllFilesAccess())
-    val hasAllFilesAccess: StateFlow<Boolean> = _hasAllFilesAccess.asStateFlow()
-
-    private val _needsAllFilesAccessBanner = MutableStateFlow(false)
-    val needsAllFilesAccessBanner: StateFlow<Boolean> = _needsAllFilesAccessBanner.asStateFlow()
-
-    private val _photoFeedback = MutableStateFlow(PhotoCaptureFeedbackState())
-    val photoFeedback: StateFlow<PhotoCaptureFeedbackState> = _photoFeedback.asStateFlow()
-
-    private var burstJob: Job? = null
-    private var photoFeedbackResetJob: Job? = null
-
-    init {
-        recomputeModeFolderState()
-        cameraManager.setCaptureOrientation(folderRepository.captureOrientation.value)
-        RecordingServiceBridge.onStopRequested = {
-            viewModelScope.launch(Dispatchers.Main.immediate) {
-                when (_captureState.value) {
-                    CaptureState.RECORDING_AUDIO -> stopAudioRecording()
-                    CaptureState.RECORDING_VIDEO -> cameraManager.stopVideoRecording()
-                    CaptureState.IDLE -> RecordingForegroundService.stop(appContext)
-                }
-            }
-        }
-
-        viewModelScope.launch {
-            galleryFolder.collect {
-                refreshFolderMedia()
-            }
-        }
-        viewModelScope.launch {
-            folders.collect {
-                recomputeModeFolderState()
-                refreshAllFolderCounts()
-            }
-        }
-    }
-
     fun onHostResume() {
-        val granted = mediaStorageManager.hasAllFilesAccess()
-        _hasAllFilesAccess.value = granted
-        if (granted) {
-            _needsAllFilesAccessBanner.value = false
+        coordinator.refreshSystemPermissions()
+        if (hasAllFilesAccess.value) {
+            _needsAllFilesAccessBanner_dismiss_if_granted()
             folderRepository.syncWithSdcardOnResume()
             cameraManager.setCaptureOrientation(folderRepository.captureOrientation.value)
+            cameraManager.setPreferredVideoLens(folderRepository.videoLensPreference.value)
+        } else {
+            mediaStorageManager.ensureAllFolderDirectoriesExist(folders.value)
+        }
+        when (captureState.value) {
+            CaptureState.RECORDING_VIDEO -> _recorderMode.value = RecorderMode.VIDEO
+            CaptureState.RECORDING_AUDIO -> _recorderMode.value = RecorderMode.AUDIO
+            CaptureState.IDLE -> Unit
         }
         recomputeModeFolderState()
         refreshAllFolderCounts()
         refreshFolderMedia()
     }
 
+    private fun _needsAllFilesAccessBanner_dismiss_if_granted() {
+        coordinator.dismissAllFilesAccessBanner()
+    }
+
     fun dismissAllFilesAccessBanner() {
-        _needsAllFilesAccessBanner.value = false
+        coordinator.dismissAllFilesAccessBanner()
     }
 
     fun toggleDarkTheme() {
@@ -177,15 +194,36 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun setCaptureOrientation(orientation: CaptureOrientation) {
-        if (_captureState.value == CaptureState.RECORDING_VIDEO) return
+        if (captureState.value == CaptureState.RECORDING_VIDEO) return
         folderRepository.setCaptureOrientation(orientation)
         cameraManager.setCaptureOrientation(orientation)
+    }
+
+    fun setVideoLensPreference(preference: VideoLensPreference) {
+        folderRepository.setVideoLensPreference(preference)
+        cameraManager.setPreferredVideoLens(preference)
+        viewModelScope.launch(Dispatchers.IO) {
+            FolderCamQuickWidget.updateAllWidgets(appContext)
+        }
+    }
+
+    fun pinQuickWidgetToHomeScreen() {
+        viewModelScope.launch {
+            val pinned = FolderCamQuickWidget.requestPinToHomeScreen(appContext)
+            if (pinned) {
+                showToast("1x1 widget pin requested")
+            } else {
+                showToast("Long-press home screen -> Widgets -> FolderCam Quick (1x1)")
+            }
+        }
     }
 
     fun restoreSettingsFromSdcard(): Boolean {
         val restored = folderRepository.restoreFromSdcardConfigFile()
         if (restored) {
             cameraManager.setCaptureOrientation(folderRepository.captureOrientation.value)
+            cameraManager.setPreferredVideoLens(folderRepository.videoLensPreference.value)
+            mediaStorageManager.ensureAllFolderDirectoriesExist(folderRepository.folders.value)
             recomputeModeFolderState()
             showToast("Restored settings from /sdcard/.foldercam")
             refreshAllFolderCounts()
@@ -200,6 +238,8 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
         val restored = folderRepository.restoreFromJsonString(jsonString)
         if (restored) {
             cameraManager.setCaptureOrientation(folderRepository.captureOrientation.value)
+            cameraManager.setPreferredVideoLens(folderRepository.videoLensPreference.value)
+            mediaStorageManager.ensureAllFolderDirectoriesExist(folderRepository.folders.value)
             recomputeModeFolderState()
             showToast("Settings restored and synced to /sdcard/.foldercam")
             refreshAllFolderCounts()
@@ -216,10 +256,8 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun setRecorderMode(mode: RecorderMode) {
         if (_recorderMode.value == mode) return
+        if (captureState.value != CaptureState.IDLE) return
         stopPhotoBurst()
-        if (_captureState.value == CaptureState.RECORDING_AUDIO && mode != RecorderMode.AUDIO) {
-            stopAudioRecording()
-        }
         _recorderMode.value = mode
         recomputeModeFolderState()
         if (mode == RecorderMode.AUDIO) {
@@ -259,6 +297,7 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
             enablePhoto = enablePhoto,
             enableVideo = enableVideo
         )
+        mediaStorageManager.ensureFolderDirectoryExists(created)
         _selectedFolderIdByMode.update { map ->
             val next = map.toMutableMap()
             RecorderMode.entries.forEach { mode ->
@@ -294,6 +333,9 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
             enablePhoto = enablePhoto,
             enableVideo = enableVideo
         )
+        folders.value.find { it.id == folderId }?.let {
+            mediaStorageManager.ensureFolderDirectoryExists(it)
+        }
         recomputeModeFolderState()
         showToast("Updated folder '$name'")
         refreshAllFolderCounts()
@@ -301,12 +343,21 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun setFolderModeEnabled(folderId: String, mode: RecorderMode, enabled: Boolean) {
+        val target = folders.value.find { it.id == folderId }
+        if (target?.isInbox == true) {
+            showToast("Inbox is mandatory for Audio, Photos, and Video")
+            return
+        }
         folderRepository.setFolderModeEnabled(folderId, mode, enabled)
         recomputeModeFolderState()
     }
 
     fun deleteFolder(folderId: String) {
         val folder = folders.value.find { it.id == folderId }
+        if (folder?.isInbox == true) {
+            showToast("Default Inbox folder cannot be removed")
+            return
+        }
         val name = folder?.name ?: "Folder"
         if (folderRepository.deleteFolder(folderId)) {
             _selectedFolderIdByMode.update { map -> map.filterValues { it != folderId } }
@@ -338,6 +389,7 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun openSettings() {
+        coordinator.refreshSystemPermissions()
         _isSettingsOpen.value = true
     }
 
@@ -359,17 +411,12 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun promptMissingFolderForMode(mode: RecorderMode) {
-        val msg = if (folders.value.isEmpty()) {
-            "Please specify at least 1 folder in Settings first"
-        } else {
-            val modeLabel = when (mode) {
-                RecorderMode.AUDIO -> "Audio"
-                RecorderMode.PHOTO -> "Photos"
-                RecorderMode.VIDEO -> "Video"
-            }
-            "Enable at least 1 folder for $modeLabel in Settings"
+        val modeLabel = when (mode) {
+            RecorderMode.AUDIO -> "Audio"
+            RecorderMode.PHOTO -> "Photos"
+            RecorderMode.VIDEO -> "Video"
         }
-        showToast(msg)
+        showToast("Enable at least 1 folder for $modeLabel in Settings")
         _isSettingsOpen.value = true
     }
 
@@ -383,7 +430,7 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
             promptMissingFolderForMode(mode)
             return null
         }
-        return mediaStorageManager.prepareOutputFile(folder, type)
+        return coordinator.prepareOutputFile(folder, type)
     }
 
     fun captureSinglePhoto(fromBurstLoop: Boolean = false) {
@@ -392,38 +439,7 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
             promptMissingFolderForMode(RecorderMode.PHOTO)
             return
         }
-
-        if (!cameraManager.canEnqueueBurstShot()) {
-            if (!fromBurstLoop) {
-                showToast("Finishing previous shots…")
-            }
-            return
-        }
-
-        photoFeedbackResetJob?.cancel()
-        val stagedFile = mediaStorageManager.prepareFastPhotoFile(folder)
-
-        _photoFeedback.update { current ->
-            current.copy(
-                triggerCounter = current.triggerCounter + 1,
-                inFlightCounter = current.inFlightCounter + 1,
-                isBurstActive = fromBurstLoop || current.isBurstActive,
-                lastFlashTriggerId = current.lastFlashTriggerId + 1L,
-                targetFolderPath = folder.sdcardPath,
-                summaryMessage = null,
-                isVisible = true
-            )
-        }
-
-        cameraManager.takePhoto(
-            outputFile = stagedFile,
-            onSuccess = { savedFile ->
-                onPhotoCapturedToFolder(folder, savedFile)
-            },
-            onError = { err ->
-                onPhotoCaptureFailed(err, silentIfBurst = fromBurstLoop)
-            }
-        )
+        coordinator.captureSinglePhoto(folder = folder, fromBurstLoop = fromBurstLoop)
     }
 
     fun startPhotoBurst() {
@@ -431,246 +447,44 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
             promptMissingFolderForMode(RecorderMode.PHOTO)
             return
         }
-        if (_captureState.value != CaptureState.IDLE) return
-
-        burstJob?.cancel()
-        photoFeedbackResetJob?.cancel()
-        _photoFeedback.update { current ->
-            current.copy(
-                isBurstActive = true,
-                targetFolderPath = folder.sdcardPath,
-                summaryMessage = null,
-                isVisible = true
-            )
-        }
-
-        burstJob = viewModelScope.launch(Dispatchers.Main.immediate) {
-            captureSinglePhoto(fromBurstLoop = true)
-            while (isActive) {
-                delay(130)
-                captureSinglePhoto(fromBurstLoop = true)
-            }
-        }
+        coordinator.startPhotoBurst(folder = folder)
     }
 
     fun stopPhotoBurst() {
-        val wasBursting = burstJob != null || _photoFeedback.value.isBurstActive
-        burstJob?.cancel()
-        burstJob = null
-        if (wasBursting) {
-            _photoFeedback.update { current ->
-                val doneSaving = current.inFlightCounter == 0 && current.savedCounter > 0
-                current.copy(
-                    isBurstActive = false,
-                    summaryMessage = if (doneSaving) {
-                        buildSavedSummary(current.savedCounter, current.targetFolderPath)
-                    } else {
-                        current.summaryMessage
-                    }
-                )
-            }
-            schedulePhotoFeedbackResetIfIdle()
-        }
+        coordinator.stopPhotoBurst()
     }
 
     fun onPhotoCaptured(file: File) {
         val folder = activeFolder() ?: return
-        onPhotoCapturedToFolder(folder, file)
+        coordinator.onPhotoCapturedToFolder(folder, file)
     }
 
-    private fun onPhotoCapturedToFolder(folder: MediaFolder, file: File) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val result = mediaStorageManager.finalizeCapturedFile(folder, file, MediaType.PHOTO)
-            if (result.requiresAllFilesAccess) {
-                _needsAllFilesAccessBanner.value = true
-            }
-
-            var shouldRefreshAndReset = false
-            _photoFeedback.update { current ->
-                val nextSaved = current.savedCounter + 1
-                val nextInFlight = (current.inFlightCounter - 1).coerceAtLeast(0)
-                val settled = nextInFlight == 0 && !current.isBurstActive
-                if (settled) {
-                    shouldRefreshAndReset = true
-                }
-                val summary = if (settled) {
-                    if (result.savedToPublicSdcard) {
-                        buildSavedSummary(nextSaved, folder.sdcardPath)
-                    } else {
-                        result.errorMessage ?: "Saved to app storage (${folder.sdcardPath})"
-                    }
-                } else {
-                    null
-                }
-                current.copy(
-                    triggerCounter = maxOf(current.triggerCounter, nextSaved),
-                    savedCounter = nextSaved,
-                    inFlightCounter = nextInFlight,
-                    targetFolderPath = folder.sdcardPath,
-                    summaryMessage = summary,
-                    isVisible = true
-                )
-            }
-
-            if (shouldRefreshAndReset) {
-                refreshFolderMedia()
-                refreshAllFolderCounts()
-                schedulePhotoFeedbackResetIfIdle()
-            }
+    fun startVideoRecording(enableAudio: Boolean) {
+        val folder = activeFolder() ?: run {
+            promptMissingFolderForMode(RecorderMode.VIDEO)
+            return
         }
-    }
-
-    private fun onPhotoCaptureFailed(message: String, silentIfBurst: Boolean) {
-        var settled = false
-        _photoFeedback.update { current ->
-            val nextInFlight = (current.inFlightCounter - 1).coerceAtLeast(0)
-            settled = nextInFlight == 0 && !current.isBurstActive
-            val summary = if (settled && current.savedCounter > 0) {
-                buildSavedSummary(current.savedCounter, current.targetFolderPath)
-            } else {
-                current.summaryMessage
-            }
-            current.copy(
-                inFlightCounter = nextInFlight,
-                summaryMessage = summary,
-                isVisible = current.savedCounter > 0 || nextInFlight > 0 || current.isBurstActive
-            )
-        }
-        if (!silentIfBurst) {
-            showToast(message)
-        }
-        if (settled) {
-            refreshFolderMedia()
-            refreshAllFolderCounts()
-            schedulePhotoFeedbackResetIfIdle()
-        }
-    }
-
-    private fun buildSavedSummary(count: Int, sdcardPath: String): String {
-        return if (count > 1) {
-            "Saved $count photos to $sdcardPath"
-        } else {
-            "Saved photo to $sdcardPath"
-        }
-    }
-
-    private fun schedulePhotoFeedbackResetIfIdle() {
-        val snap = _photoFeedback.value
-        if (snap.isBurstActive || snap.inFlightCounter > 0) return
-
-        photoFeedbackResetJob?.cancel()
-        photoFeedbackResetJob = viewModelScope.launch {
-            delay(2400)
-            val latest = _photoFeedback.value
-            if (!latest.isBurstActive && latest.inFlightCounter == 0) {
-                _photoFeedback.value = PhotoCaptureFeedbackState()
-            }
-        }
-    }
-
-    fun onVideoRecordingStarted() {
-        val folder = selectedFolder.value
         _recorderMode.value = RecorderMode.VIDEO
-        _captureState.value = CaptureState.RECORDING_VIDEO
-        _videoDurationSeconds.value = 0
-
-        RecordingForegroundService.start(
-            context = appContext,
-            recordingType = RecordingForegroundService.TYPE_VIDEO,
-            folderName = folder?.name ?: "Folder",
-            sdcardPath = folder?.sdcardPath ?: "/sdcard"
-        )
-
-        videoTimerJob?.cancel()
-        videoTimerJob = viewModelScope.launch(Dispatchers.Default) {
-            val startTime = System.currentTimeMillis()
-            while (isActive) {
-                delay(500)
-                _videoDurationSeconds.value = ((System.currentTimeMillis() - startTime) / 1000).toInt()
-            }
-        }
+        coordinator.startInAppVideoRecording(folder = folder, enableAudio = enableAudio)
     }
 
-    fun onVideoSaved(file: File) {
-        videoTimerJob?.cancel()
-        videoTimerJob = null
-        _captureState.value = CaptureState.IDLE
-        RecordingForegroundService.stop(appContext)
-
-        val folder = selectedFolder.value ?: return
-        viewModelScope.launch {
-            val result = mediaStorageManager.finalizeCapturedFile(folder, file, MediaType.VIDEO)
-            if (result.savedToPublicSdcard) {
-                showToast("Video saved to ${folder.sdcardPath}")
-            } else {
-                if (result.requiresAllFilesAccess) {
-                    _needsAllFilesAccessBanner.value = true
-                }
-                showToast(result.errorMessage ?: "Saved to app storage (${folder.sdcardPath})")
-            }
-            refreshFolderMedia()
-            refreshAllFolderCounts()
-        }
-    }
-
-    fun onVideoError(message: String) {
-        videoTimerJob?.cancel()
-        videoTimerJob = null
-        _captureState.value = CaptureState.IDLE
-        RecordingForegroundService.stop(appContext)
-        showToast("Video error: $message")
+    fun stopVideoRecording() {
+        coordinator.stopVideoRecording()
     }
 
     fun startAudioRecording(): Boolean {
-        if (_captureState.value != CaptureState.IDLE) return false
+        if (captureState.value != CaptureState.IDLE) return false
         _recorderMode.value = RecorderMode.AUDIO
-        cameraManager.unbindCameraIfIdle()
-        val folder = selectedFolder.value ?: run {
+        val folder = activeFolder() ?: run {
             promptMissingFolderForMode(RecorderMode.AUDIO)
             return false
         }
-        val outputFile = prepareOutputFile(MediaType.AUDIO) ?: return false
-        val fallbackFile = mediaStorageManager.prepareStagingFallbackFile(folder, outputFile.name)
-        val started = audioRecorderManager.startRecording(
-            outputFile = outputFile,
-            scope = viewModelScope,
-            fallbackFile = fallbackFile
-        )
-        if (started) {
-            _captureState.value = CaptureState.RECORDING_AUDIO
-            RecordingForegroundService.start(
-                context = appContext,
-                recordingType = RecordingForegroundService.TYPE_AUDIO,
-                folderName = folder.name,
-                sdcardPath = folder.sdcardPath
-            )
-        } else {
-            showToast("Failed to start audio recording")
-        }
-        return started
+        coordinator.startInAppAudioRecording(folder = folder)
+        return true
     }
 
     fun stopAudioRecording() {
-        val file = audioRecorderManager.stopRecording()
-        _captureState.value = CaptureState.IDLE
-        RecordingForegroundService.stop(appContext)
-
-        val folder = selectedFolder.value
-        if (file != null && file.exists() && folder != null) {
-            viewModelScope.launch {
-                val result = mediaStorageManager.finalizeCapturedFile(folder, file, MediaType.AUDIO)
-                if (result.savedToPublicSdcard) {
-                    showToast("Audio saved to ${folder.sdcardPath}")
-                } else {
-                    if (result.requiresAllFilesAccess) {
-                        _needsAllFilesAccessBanner.value = true
-                    }
-                    showToast(result.errorMessage ?: "Saved to app storage (${folder.sdcardPath})")
-                }
-                refreshFolderMedia()
-                refreshAllFolderCounts()
-            }
-        }
+        coordinator.stopAudioRecording()
     }
 
     fun deleteMediaItem(item: MediaItem) {
@@ -706,20 +520,10 @@ class FolderCamViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun showToast(message: String) {
-        _toastMessage.value = message
+        coordinator.showToast(message)
     }
 
     fun clearToast() {
-        _toastMessage.value = null
-    }
-
-    override fun onCleared() {
-        super.onCleared()
-        burstJob?.cancel()
-        photoFeedbackResetJob?.cancel()
-        videoTimerJob?.cancel()
-        audioRecorderManager.cancelRecording()
-        cameraManager.release()
-        RecordingForegroundService.stop(appContext)
+        coordinator.clearToast()
     }
 }

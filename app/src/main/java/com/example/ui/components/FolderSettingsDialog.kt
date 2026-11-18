@@ -45,6 +45,8 @@ import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.SdStorage
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.WarningAmber
+import androidx.compose.material.icons.filled.Widgets
+import androidx.compose.material.icons.filled.DoNotDisturbOn
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.Button
@@ -91,6 +93,7 @@ import androidx.compose.ui.zIndex
 import com.example.data.FolderRepository
 import com.example.model.MediaFolder
 import com.example.model.RecorderMode
+import com.example.model.VideoLensPreference
 
 @Composable
 fun FolderSettingsDialog(
@@ -99,8 +102,13 @@ fun FolderSettingsDialog(
     folderCounts: Map<String, Int>,
     isDarkTheme: Boolean,
     hasAllFilesAccess: Boolean,
+    videoLensPreference: VideoLensPreference = VideoLensPreference.WIDE,
+    dndPolicyGranted: Boolean = false,
     onRequestAllFilesAccess: () -> Unit,
     onToggleDarkTheme: (Boolean) -> Unit,
+    onSetVideoLensPreference: (VideoLensPreference) -> Unit = {},
+    onRequestDndAccess: () -> Unit = {},
+    onPinQuickWidget: () -> Unit = {},
     onRestoreFromSdcardFile: () -> Unit,
     onRestoreFromJsonContent: (String) -> Unit,
     onSelectFolder: (MediaFolder) -> Unit,
@@ -264,6 +272,174 @@ fun FolderSettingsDialog(
                             onCheckedChange = { onToggleDarkTheme(it) },
                             modifier = Modifier.testTag("settings_theme_switch")
                         )
+                    }
+                }
+
+                // Video Camera Lens Setting (Wide 1x default vs Ultra-Wide 0.5x — applies to App Video & 1x1 Widget)
+                OutlinedCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = MaterialTheme.shapes.medium
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.Videocam,
+                                contentDescription = null,
+                                tint = colorScheme.primary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Video Camera Lens (App & 1x1 Widget)",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                        Text(
+                            text = "Choose Wide (1x, default) or Ultra-Wide (0.5x) for Video mode and background widget recording.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colorScheme.onSurfaceVariant
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            VideoLensPreference.entries.forEach { option ->
+                                val selected = videoLensPreference == option
+                                FilterChip(
+                                    selected = selected,
+                                    onClick = { onSetVideoLensPreference(option) },
+                                    label = { Text(option.displayLabel) },
+                                    leadingIcon = if (selected) {
+                                        {
+                                            Icon(
+                                                imageVector = Icons.Default.Check,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    } else null,
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = colorScheme.primaryContainer,
+                                        selectedLabelColor = colorScheme.onPrimaryContainer,
+                                        selectedLeadingIconColor = colorScheme.onPrimaryContainer
+                                    ),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("settings_lens_${option.storageKey.lowercase()}")
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Global Do Not Disturb Access Card
+                OutlinedCard(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("settings_dnd_access_card"),
+                    shape = MaterialTheme.shapes.medium,
+                    border = BorderStroke(
+                        width = 1.dp,
+                        color = if (dndPolicyGranted) colorScheme.outlineVariant else colorScheme.primary
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Default.DoNotDisturbOn,
+                                    contentDescription = null,
+                                    tint = if (dndPolicyGranted) colorScheme.primary else colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = if (dndPolicyGranted) {
+                                        "Do Not Disturb Access Granted"
+                                    } else {
+                                        "Allow Do Not Disturb Control"
+                                    },
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = if (dndPolicyGranted) colorScheme.primary else colorScheme.onSurface
+                                )
+                            }
+                            Text(
+                                text = "Turns DND ON during Audio & Video recordings (app & widget) and restores it when stopped.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colorScheme.onSurfaceVariant
+                            )
+                        }
+                        if (!dndPolicyGranted) {
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Button(
+                                onClick = onRequestDndAccess,
+                                modifier = Modifier.testTag("grant_dnd_access_button")
+                            ) {
+                                Text("Allow")
+                            }
+                        } else {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = "Do Not Disturb access granted",
+                                tint = colorScheme.primary
+                            )
+                        }
+                    }
+                }
+
+                // 1x1 Home Screen Quick-Record Widget Card
+                OutlinedCard(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("settings_widget_pin_card"),
+                    shape = MaterialTheme.shapes.medium
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Default.Widgets,
+                                    contentDescription = null,
+                                    tint = colorScheme.primary,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "1x1 Quick-Record Widget",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                            Text(
+                                text = "Top = Background Video • Bottom = Background Audio + DND (always saves to Inbox).",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        FilledTonalButton(
+                            onClick = onPinQuickWidget,
+                            modifier = Modifier.testTag("pin_quick_widget_button")
+                        ) {
+                            Text("Add")
+                        }
                     }
                 }
 
@@ -499,23 +675,30 @@ fun FolderSettingsDialog(
                                 }
                             }
 
+                            val isEditingInbox = editingFolderId != null &&
+                                folders.find { it.id == editingFolderId }?.isInbox == true
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 Text(
-                                    text = "Show this folder in modes:",
+                                    text = if (isEditingInbox) {
+                                        "Mandatory for Audio, Photos & Video (locked ON):"
+                                    } else {
+                                        "Show this folder in modes:"
+                                    },
                                     style = MaterialTheme.typography.labelMedium,
                                     fontWeight = FontWeight.SemiBold,
                                     color = colorScheme.onSurfaceVariant
                                 )
                                 ModeToggleChipRow(
-                                    enableAudio = formEnableAudio,
-                                    enablePhoto = formEnablePhoto,
-                                    enableVideo = formEnableVideo,
+                                    enableAudio = if (isEditingInbox) true else formEnableAudio,
+                                    enablePhoto = if (isEditingInbox) true else formEnablePhoto,
+                                    enableVideo = if (isEditingInbox) true else formEnableVideo,
+                                    locked = isEditingInbox,
                                     audioTestTag = "form_toggle_audio",
                                     photoTestTag = "form_toggle_photo",
                                     videoTestTag = "form_toggle_video",
-                                    onToggleAudio = { formEnableAudio = it },
-                                    onTogglePhoto = { formEnablePhoto = it },
-                                    onToggleVideo = { formEnableVideo = it }
+                                    onToggleAudio = { if (!isEditingInbox) formEnableAudio = it },
+                                    onTogglePhoto = { if (!isEditingInbox) formEnablePhoto = it },
+                                    onToggleVideo = { if (!isEditingInbox) formEnableVideo = it }
                                 )
                             }
 
@@ -720,8 +903,17 @@ fun FolderSettingsDialog(
                                                         overflow = TextOverflow.Ellipsis,
                                                         modifier = Modifier.weight(1f, fill = false)
                                                     )
+                                                    if (folder.isInbox) {
+                                                        Spacer(modifier = Modifier.width(6.dp))
+                                                        Badge(
+                                                            containerColor = colorScheme.secondaryContainer,
+                                                            contentColor = colorScheme.onSecondaryContainer
+                                                        ) {
+                                                            Text("Inbox")
+                                                        }
+                                                    }
                                                     if (isSelected) {
-                                                        Spacer(modifier = Modifier.width(8.dp))
+                                                        Spacer(modifier = Modifier.width(6.dp))
                                                         Badge(
                                                             containerColor = colorScheme.primaryContainer,
                                                             contentColor = colorScheme.onPrimaryContainer
@@ -831,15 +1023,17 @@ fun FolderSettingsDialog(
                                                             modifier = Modifier.size(18.dp)
                                                         )
                                                     }
-                                                    IconButton(
-                                                        onClick = { onDeleteFolder(folder.id) }
-                                                    ) {
-                                                        Icon(
-                                                            imageVector = Icons.Default.DeleteOutline,
-                                                            contentDescription = "Delete Folder",
-                                                            tint = colorScheme.error,
-                                                            modifier = Modifier.size(18.dp)
-                                                        )
+                                                    if (!folder.isInbox) {
+                                                        IconButton(
+                                                            onClick = { onDeleteFolder(folder.id) }
+                                                        ) {
+                                                            Icon(
+                                                                imageVector = Icons.Default.DeleteOutline,
+                                                                contentDescription = "Delete Folder",
+                                                                tint = colorScheme.error,
+                                                                modifier = Modifier.size(18.dp)
+                                                            )
+                                                        }
                                                     }
                                                 }
                                             },
@@ -852,7 +1046,7 @@ fun FolderSettingsDialog(
                                             )
                                         )
 
-                                        // Per-Folder Audio / Photos / Video Toggles
+                                        // Per-Folder Audio / Photos / Video Toggles (locked ON for mandatory Inbox)
                                         Column(
                                             modifier = Modifier
                                                 .fillMaxWidth()
@@ -864,6 +1058,7 @@ fun FolderSettingsDialog(
                                                 enableAudio = folder.enableAudio,
                                                 enablePhoto = folder.enablePhoto,
                                                 enableVideo = folder.enableVideo,
+                                                locked = folder.isInbox,
                                                 audioTestTag = "folder_${folder.id}_toggle_audio",
                                                 photoTestTag = "folder_${folder.id}_toggle_photo",
                                                 videoTestTag = "folder_${folder.id}_toggle_video",
@@ -877,7 +1072,13 @@ fun FolderSettingsDialog(
                                                     onToggleFolderMode(folder.id, RecorderMode.VIDEO, enabled)
                                                 }
                                             )
-                                            if (!folder.hasAnyModeEnabled()) {
+                                            if (folder.isInbox) {
+                                                Text(
+                                                    text = "Mandatory default folder (all 3 modes locked ON, path editable)",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = colorScheme.onSurfaceVariant
+                                                )
+                                            } else if (!folder.hasAnyModeEnabled()) {
                                                 Text(
                                                     text = "Hidden from capture bar (enable at least one mode)",
                                                     style = MaterialTheme.typography.labelSmall,
@@ -984,6 +1185,7 @@ private fun ModeToggleChipRow(
     enableAudio: Boolean,
     enablePhoto: Boolean,
     enableVideo: Boolean,
+    locked: Boolean = false,
     audioTestTag: String,
     photoTestTag: String,
     videoTestTag: String,
@@ -999,7 +1201,8 @@ private fun ModeToggleChipRow(
     ) {
         FilterChip(
             selected = enableAudio,
-            onClick = { onToggleAudio(!enableAudio) },
+            onClick = { if (!locked) onToggleAudio(!enableAudio) },
+            enabled = !locked,
             label = { Text("Audio") },
             leadingIcon = {
                 Icon(
@@ -1011,14 +1214,18 @@ private fun ModeToggleChipRow(
             colors = FilterChipDefaults.filterChipColors(
                 selectedContainerColor = colorScheme.primaryContainer,
                 selectedLabelColor = colorScheme.onPrimaryContainer,
-                selectedLeadingIconColor = colorScheme.onPrimaryContainer
+                selectedLeadingIconColor = colorScheme.onPrimaryContainer,
+                disabledSelectedContainerColor = colorScheme.primaryContainer.copy(alpha = 0.72f),
+                disabledLabelColor = colorScheme.onPrimaryContainer,
+                disabledLeadingIconColor = colorScheme.onPrimaryContainer
             ),
             modifier = Modifier.testTag(audioTestTag)
         )
 
         FilterChip(
             selected = enablePhoto,
-            onClick = { onTogglePhoto(!enablePhoto) },
+            onClick = { if (!locked) onTogglePhoto(!enablePhoto) },
+            enabled = !locked,
             label = { Text("Photos") },
             leadingIcon = {
                 Icon(
@@ -1030,14 +1237,18 @@ private fun ModeToggleChipRow(
             colors = FilterChipDefaults.filterChipColors(
                 selectedContainerColor = colorScheme.primaryContainer,
                 selectedLabelColor = colorScheme.onPrimaryContainer,
-                selectedLeadingIconColor = colorScheme.onPrimaryContainer
+                selectedLeadingIconColor = colorScheme.onPrimaryContainer,
+                disabledSelectedContainerColor = colorScheme.primaryContainer.copy(alpha = 0.72f),
+                disabledLabelColor = colorScheme.onPrimaryContainer,
+                disabledLeadingIconColor = colorScheme.onPrimaryContainer
             ),
             modifier = Modifier.testTag(photoTestTag)
         )
 
         FilterChip(
             selected = enableVideo,
-            onClick = { onToggleVideo(!enableVideo) },
+            onClick = { if (!locked) onToggleVideo(!enableVideo) },
+            enabled = !locked,
             label = { Text("Video") },
             leadingIcon = {
                 Icon(
@@ -1049,7 +1260,10 @@ private fun ModeToggleChipRow(
             colors = FilterChipDefaults.filterChipColors(
                 selectedContainerColor = colorScheme.primaryContainer,
                 selectedLabelColor = colorScheme.onPrimaryContainer,
-                selectedLeadingIconColor = colorScheme.onPrimaryContainer
+                selectedLeadingIconColor = colorScheme.onPrimaryContainer,
+                disabledSelectedContainerColor = colorScheme.primaryContainer.copy(alpha = 0.72f),
+                disabledLabelColor = colorScheme.onPrimaryContainer,
+                disabledLeadingIconColor = colorScheme.onPrimaryContainer
             ),
             modifier = Modifier.testTag(videoTestTag)
         )

@@ -1,5 +1,6 @@
 package com.example.service
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,10 +8,12 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.example.MainActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -21,10 +24,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.Locale
-
-object RecordingServiceBridge {
-    var onStopRequested: (() -> Unit)? = null
-}
 
 class RecordingForegroundService : Service() {
 
@@ -40,9 +39,48 @@ class RecordingForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val coordinator = RecordingCoordinator.getInstance(applicationContext)
         when (intent?.action) {
+            ACTION_WIDGET_TOGGLE_VIDEO -> {
+                val hasCamPerm = ContextCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.CAMERA
+                ) == PackageManager.PERMISSION_GRANTED
+                if (hasCamPerm) {
+                    val inbox = coordinator.folderRepository.getInboxFolder()
+                    startTimeMs = System.currentTimeMillis()
+                    val notif = buildNotification(
+                        recordingType = TYPE_VIDEO,
+                        folderName = inbox.name,
+                        sdcardPath = inbox.sdcardPath,
+                        elapsedSeconds = 0
+                    )
+                    startForegroundSafely(TYPE_VIDEO, notif)
+                }
+                coordinator.handleWidgetVideoToggle()
+                return START_STICKY
+            }
+            ACTION_WIDGET_TOGGLE_AUDIO -> {
+                val hasAudioPerm = ContextCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.RECORD_AUDIO
+                ) == PackageManager.PERMISSION_GRANTED
+                if (hasAudioPerm) {
+                    val inbox = coordinator.folderRepository.getInboxFolder()
+                    startTimeMs = System.currentTimeMillis()
+                    val notif = buildNotification(
+                        recordingType = TYPE_AUDIO,
+                        folderName = inbox.name,
+                        sdcardPath = inbox.sdcardPath,
+                        elapsedSeconds = 0
+                    )
+                    startForegroundSafely(TYPE_AUDIO, notif)
+                }
+                coordinator.handleWidgetAudioToggle()
+                return START_STICKY
+            }
             ACTION_STOP_FROM_NOTIFICATION -> {
-                RecordingServiceBridge.onStopRequested?.invoke()
+                coordinator.stopActiveRecordingFromNotification()
                 stopForegroundServiceCleanly()
                 return START_NOT_STICKY
             }
@@ -52,8 +90,8 @@ class RecordingForegroundService : Service() {
             }
             ACTION_START_RECORDING -> {
                 val recordingType = intent.getStringExtra(EXTRA_RECORDING_TYPE) ?: TYPE_AUDIO
-                val folderName = intent.getStringExtra(EXTRA_FOLDER_NAME) ?: "Folder"
-                val sdcardPath = intent.getStringExtra(EXTRA_SDCARD_PATH) ?: "/sdcard"
+                val folderName = intent.getStringExtra(EXTRA_FOLDER_NAME) ?: "Inbox"
+                val sdcardPath = intent.getStringExtra(EXTRA_SDCARD_PATH) ?: "/sdcard/inbox"
 
                 startTimeMs = System.currentTimeMillis()
                 val initialNotification = buildNotification(
@@ -75,8 +113,16 @@ class RecordingForegroundService : Service() {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 val fgsType = if (recordingType == TYPE_VIDEO) {
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                    val hasMic = ContextCompat.checkSelfPermission(
+                        this,
+                        Manifest.permission.RECORD_AUDIO
+                    ) == PackageManager.PERMISSION_GRANTED
+                    if (hasMic) {
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or
+                            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                    } else {
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+                    }
                 } else {
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
                 }
@@ -165,7 +211,7 @@ class RecordingForegroundService : Service() {
             .setSmallIcon(smallIcon)
             .setContentTitle(title)
             .setContentText("Saving to $folderName ($sdcardPath)")
-            .setSubText("Recording in background")
+            .setSubText("DND & Background capture active")
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setUsesChronometer(true)
@@ -221,6 +267,8 @@ class RecordingForegroundService : Service() {
         const val ACTION_START_RECORDING = "com.example.action.START_RECORDING"
         const val ACTION_STOP_SERVICE = "com.example.action.STOP_SERVICE"
         const val ACTION_STOP_FROM_NOTIFICATION = "com.example.action.STOP_FROM_NOTIFICATION"
+        const val ACTION_WIDGET_TOGGLE_VIDEO = "com.example.action.WIDGET_TOGGLE_VIDEO"
+        const val ACTION_WIDGET_TOGGLE_AUDIO = "com.example.action.WIDGET_TOGGLE_AUDIO"
 
         const val EXTRA_RECORDING_TYPE = "extra_recording_type"
         const val EXTRA_FOLDER_NAME = "extra_folder_name"
@@ -228,6 +276,18 @@ class RecordingForegroundService : Service() {
 
         const val TYPE_AUDIO = "AUDIO"
         const val TYPE_VIDEO = "VIDEO"
+
+        fun createWidgetVideoIntent(context: Context): Intent {
+            return Intent(context, RecordingForegroundService::class.java).apply {
+                action = ACTION_WIDGET_TOGGLE_VIDEO
+            }
+        }
+
+        fun createWidgetAudioIntent(context: Context): Intent {
+            return Intent(context, RecordingForegroundService::class.java).apply {
+                action = ACTION_WIDGET_TOGGLE_AUDIO
+            }
+        }
 
         fun start(
             context: Context,

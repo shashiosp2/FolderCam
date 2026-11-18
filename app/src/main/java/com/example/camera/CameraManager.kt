@@ -36,9 +36,11 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
 import com.example.model.CaptureOrientation
 import com.example.model.RecorderMode
+import com.example.model.VideoLensPreference
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.Locale
 import java.util.concurrent.ExecutorService
@@ -66,6 +68,7 @@ data class CameraUiState(
         LensOption(id = "1x", label = "1x", name = "Wide", targetZoomRatio = 1.0f)
     ),
     val selectedLensId: String = "1x",
+    val preferredVideoLens: VideoLensPreference = VideoLensPreference.WIDE,
     val photoResolution: String = "12MP",
     val videoResolution: String = "4K 30fps",
     val captureOrientation: CaptureOrientation = CaptureOrientation.AUTO,
@@ -124,7 +127,11 @@ class CameraManager(private val context: Context) {
         private const val MIN_FULL_RES_PHOTO_PIXELS = 8_000_000L
         // Default 30 FPS range for 4K video recording
         val DEFAULT_VIDEO_30FPS_RANGE = Range(30, 30)
-        const val MAX_IN_FLIGHT_BURST = 6
+        // Burst-tuned JPEG quality (88%) cuts frame footprint ~40-50% for safe 100-shot RAM buffering
+        const val BURST_JPEG_QUALITY = 88
+        const val MAX_BURST_PHOTOS = 100
+        // Concurrent ImageCapture pipeline depth (frames drain to RAM immediately on completion)
+        const val MAX_IN_FLIGHT_CAPTURE_PIPELINE = 8
         // Use MINIMIZE_LATENCY instead of ZSL PRIVATE reprocessing so hardware/digital zoom crops
         // (CONTROL_ZOOM_RATIO / SCALER_CROP_REGION) are reliably applied to captured still photos.
         const val DEFAULT_PHOTO_CAPTURE_MODE = ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
@@ -169,7 +176,7 @@ class CameraManager(private val context: Context) {
     }
 
     val backgroundLifecycleOwner = BackgroundCameraLifecycleOwner()
-    private val captureExecutor: ExecutorService = Executors.newFixedThreadPool(2)
+    private val captureExecutor: ExecutorService = Executors.newFixedThreadPool(3)
     private val inFlightImageCaptures = AtomicInteger(0)
     private var cameraProvider: ProcessCameraProvider? = null
     private var camera: Camera? = null
@@ -182,6 +189,7 @@ class CameraManager(private val context: Context) {
     private var lastPreviewView: PreviewView? = null
     private var boundPreviewView: PreviewView? = null
     private var activeCustomSelector: CameraSelector? = null
+    private var activeBoundSelector: CameraSelector? = null
     private var isCameraBound = false
     private var boundHasImageCapture = false
     private var boundHasVideoCapture = false
@@ -189,6 +197,9 @@ class CameraManager(private val context: Context) {
     private var isHostForeground = true
     private var activeMode: RecorderMode = RecorderMode.AUDIO
     private var isProviderRequestInFlight = false
+
+    @Volatile
+    private var preferredVideoLensPreference: VideoLensPreference = VideoLensPreference.WIDE
 
     @Volatile
     private var currentTargetRotation: Int = Surface.ROTATION_0
@@ -254,6 +265,27 @@ class CameraManager(private val context: Context) {
             captureOrientation = orientation,
             detectedAutoRotation = lastAutoDetectedRotation
         )
+    }
+
+    fun setPreferredVideoLens(preference: VideoLensPreference) {
+        preferredVideoLensPreference = preference
+        _cameraState.value = _cameraState.value.copy(preferredVideoLens = preference)
+
+        val currentPreview = lastPreviewView
+        if (!isRecordingVideo() &&
+            isHostForeground &&
+            activeMode == RecorderMode.VIDEO &&
+            currentPreview != null &&
+            cameraProvider != null
+        ) {
+            isFrontCamera = false
+            activeCustomSelector = null
+            bindCamera(
+                previewView = currentPreview,
+                mode = RecorderMode.VIDEO,
+                applyVideoLensPref = true
+            )
+        }
     }
 
     private fun updateAutoDetectedRotation(rotation: Int) {
@@ -375,13 +407,37 @@ class CameraManager(private val context: Context) {
             return
         }
 
-        // If actively recording video (e.g., returned from background), keep VideoCapture alive
-        // and only re-attach surfaceProvider if the PreviewView instance changed.
+        // If actively recording video (started from widget or background), keep VideoCapture alive
+        // and attach or update Preview without unbinding the active recording!
         if (isRecordingVideo() && cameraProvider != null && isCameraBound) {
             backgroundLifecycleOwner.moveToResumed()
-            if (boundPreviewView !== previewView) {
-                preview?.surfaceProvider = previewView.surfaceProvider
-                boundPreviewView = previewView
+            val currentPreview = preview
+            if (currentPreview != null) {
+                if (boundPreviewView !== previewView) {
+                    currentPreview.surfaceProvider = previewView.surfaceProvider
+                    boundPreviewView = previewView
+                }
+            } else {
+                // Started headlessly without PreviewView -> attach Preview alongside active VideoCapture
+                val provider = cameraProvider
+                val selector = activeBoundSelector ?: CameraSelector.DEFAULT_BACK_CAMERA
+                if (provider != null) {
+                    try {
+                        val previewDisplayRotation = previewView.display?.rotation
+                            ?: displayManager?.getDisplay(Display.DEFAULT_DISPLAY)?.rotation
+                            ?: Surface.ROTATION_0
+                        val newPreview = Preview.Builder()
+                            .setTargetRotation(previewDisplayRotation)
+                            .build()
+                            .also { it.surfaceProvider = previewView.surfaceProvider }
+                        provider.bindToLifecycle(backgroundLifecycleOwner, selector, newPreview)
+                        preview = newPreview
+                        boundPreviewView = previewView
+                    } catch (e: Exception) {
+                        // Some HALs forbid adding Preview mid-stream; background video continues safely
+                        e.printStackTrace()
+                    }
+                }
             }
             onInitialized()
             return
@@ -407,7 +463,11 @@ class CameraManager(private val context: Context) {
 
         val existingProvider = cameraProvider
         if (existingProvider != null) {
-            bindCamera(previewView, mode)
+            bindCamera(
+                previewView = previewView,
+                mode = mode,
+                applyVideoLensPref = (mode == RecorderMode.VIDEO)
+            )
             onInitialized()
             return
         }
@@ -422,8 +482,12 @@ class CameraManager(private val context: Context) {
                 val provider = cameraProviderFuture.get()
                 cameraProvider = provider
                 val latestPreview = lastPreviewView ?: previewView
-                if (isHostForeground && activeMode != RecorderMode.AUDIO) {
-                    bindCamera(latestPreview, activeMode)
+                if (isHostForeground && activeMode != RecorderMode.AUDIO && !isRecordingVideo()) {
+                    bindCamera(
+                        previewView = latestPreview,
+                        mode = activeMode,
+                        applyVideoLensPref = (activeMode == RecorderMode.VIDEO)
+                    )
                     onInitialized()
                 }
             } catch (e: Exception) {
@@ -529,16 +593,41 @@ class CameraManager(private val context: Context) {
         imageCapture = null
         videoCapture = null
         boundPreviewView = null
+        activeBoundSelector = null
         isCameraBound = false
         boundHasImageCapture = false
         boundHasVideoCapture = false
+    }
+
+    private fun buildVideoUseCase(initialRotation: Int, highQuality4k: Boolean): VideoCapture<Recorder> {
+        val qualitySelector = if (highQuality4k) {
+            QualitySelector.fromOrderedList(
+                listOf(Quality.UHD, Quality.FHD, Quality.HD, Quality.SD),
+                FallbackStrategy.higherQualityOrLowerThan(Quality.UHD)
+            )
+        } else {
+            QualitySelector.fromOrderedList(
+                listOf(Quality.UHD, Quality.FHD, Quality.HD, Quality.SD),
+                FallbackStrategy.lowerQualityOrHigherThan(Quality.UHD)
+            )
+        }
+        val recorder = Recorder.Builder()
+            .setQualitySelector(qualitySelector)
+            .build()
+        val builder = VideoCapture.Builder(recorder)
+            .setTargetRotation(initialRotation)
+        if (highQuality4k) {
+            builder.setTargetFrameRate(DEFAULT_VIDEO_30FPS_RANGE)
+        }
+        return builder.build()
     }
 
     private fun bindCamera(
         previewView: PreviewView,
         mode: RecorderMode,
         initialZoom: Float = _cameraState.value.currentZoomRatio,
-        selectedLensId: String = _cameraState.value.selectedLensId
+        selectedLensId: String = _cameraState.value.selectedLensId,
+        applyVideoLensPref: Boolean = false
     ) {
         val provider = cameraProvider ?: return
         if (isRecordingVideo()) return
@@ -588,19 +677,7 @@ class CameraManager(private val context: Context) {
         var effectiveVideoLabel = "4K 30fps"
 
         if (mode == RecorderMode.VIDEO) {
-            // Video Mode: Bind Preview + 4K 30fps VideoCapture with graceful quality fallbacks
-            val video4kQualitySelector = QualitySelector.fromOrderedList(
-                listOf(Quality.UHD, Quality.FHD, Quality.HD, Quality.SD),
-                FallbackStrategy.higherQualityOrLowerThan(Quality.UHD)
-            )
-            val recorder4k = Recorder.Builder()
-                .setQualitySelector(video4kQualitySelector)
-                .build()
-            val video4k30UseCase = VideoCapture.Builder(recorder4k)
-                .setTargetFrameRate(DEFAULT_VIDEO_30FPS_RANGE)
-                .setTargetRotation(initialRotation)
-                .build()
-
+            val video4k30UseCase = buildVideoUseCase(initialRotation, highQuality4k = true)
             boundCamera = tryBindUseCases(
                 provider = provider,
                 selector = cameraSelector,
@@ -609,17 +686,7 @@ class CameraManager(private val context: Context) {
             if (boundCamera != null) {
                 activeVideoCapture = video4k30UseCase
             } else {
-                val fallbackRecorder = Recorder.Builder()
-                    .setQualitySelector(
-                        QualitySelector.fromOrderedList(
-                            listOf(Quality.UHD, Quality.FHD, Quality.HD, Quality.SD),
-                            FallbackStrategy.lowerQualityOrHigherThan(Quality.UHD)
-                        )
-                    )
-                    .build()
-                val adaptiveVideoUseCase = VideoCapture.Builder(fallbackRecorder)
-                    .setTargetRotation(initialRotation)
-                    .build()
+                val adaptiveVideoUseCase = buildVideoUseCase(initialRotation, highQuality4k = false)
                 boundCamera = tryBindUseCases(
                     provider = provider,
                     selector = cameraSelector,
@@ -631,9 +698,6 @@ class CameraManager(private val context: Context) {
                 }
             }
         } else {
-            // Photo Mode: Use CAPTURE_MODE_MINIMIZE_LATENCY directly (avoid ZSL PRIVATE reprocessing,
-            // which drops CONTROL_ZOOM_RATIO / SCALER_CROP_REGION on many HALs and outputs 1x photos).
-            // Verify >= 8MP (12MP target) and fall back to MAXIMIZE_QUALITY only if resolution is capped.
             val minLatencyCandidate = buildPhotoUseCase(
                 captureMode = DEFAULT_PHOTO_CAPTURE_MODE,
                 selector = photo12MpResolutionSelector,
@@ -689,6 +753,7 @@ class CameraManager(private val context: Context) {
                 if (boundCamera == null) {
                     val autoImageUseCase = ImageCapture.Builder()
                         .setCaptureMode(DEFAULT_PHOTO_CAPTURE_MODE)
+                        .setJpegQuality(BURST_JPEG_QUALITY)
                         .setFlashMode(ImageCapture.FLASH_MODE_OFF)
                         .setTargetRotation(initialRotation)
                         .build()
@@ -719,11 +784,11 @@ class CameraManager(private val context: Context) {
         videoCapture = activeVideoCapture
         camera = boundCamera
         boundPreviewView = previewView
+        activeBoundSelector = cameraSelector
         isCameraBound = true
         boundHasImageCapture = activeImageCapture != null
         boundHasVideoCapture = activeVideoCapture != null
 
-        // Apply torch state safely
         if (isTorchEnabled) {
             try {
                 boundCamera.cameraControl.enableTorch(true)
@@ -732,7 +797,6 @@ class CameraManager(private val context: Context) {
             }
         }
 
-        // Inspect zoom range & available lenses (Ultrawide -> Wide -> Zoom/Telephoto)
         val zoomState = boundCamera.cameraInfo.zoomState.value
         val minZoom = zoomState?.minZoomRatio ?: 1.0f
         val maxZoom = zoomState?.maxZoomRatio ?: 8.0f
@@ -744,8 +808,30 @@ class CameraManager(private val context: Context) {
             maxZoom = maxZoom
         )
 
-        val targetZoom = initialZoom.coerceIn(minZoom, maxZoom)
-        if (abs(targetZoom - 1.0f) > 0.001f) {
+        var targetZoom = initialZoom.coerceIn(minZoom, maxZoom)
+        var resolvedLensId = selectedLensId
+
+        // Apply configured Wide (1x) / Ultra-Wide (0.5x) preference in Video mode
+        if (applyVideoLensPref && mode == RecorderMode.VIDEO && !isFrontCamera) {
+            val preferredOption = resolveLensForPreference(discoveredLenses, preferredVideoLensPreference)
+            if (preferredOption.customCameraSelector != null &&
+                preferredOption.customCameraSelector != activeCustomSelector
+            ) {
+                activeCustomSelector = preferredOption.customCameraSelector
+                bindCamera(
+                    previewView = previewView,
+                    mode = mode,
+                    initialZoom = preferredOption.targetZoomRatio,
+                    selectedLensId = preferredOption.id,
+                    applyVideoLensPref = false
+                )
+                return
+            }
+            targetZoom = preferredOption.targetZoomRatio.coerceIn(minZoom, maxZoom)
+            resolvedLensId = preferredOption.id
+        }
+
+        if (abs(targetZoom - 1.0f) > 0.001f || abs(targetZoom - (zoomState?.zoomRatio ?: 1.0f)) > 0.001f) {
             try {
                 boundCamera.cameraControl.setZoomRatio(targetZoom)
             } catch (e: Exception) {
@@ -766,13 +852,186 @@ class CameraManager(private val context: Context) {
             minZoomRatio = minZoom,
             maxZoomRatio = maxZoom,
             lensOptions = discoveredLenses,
-            selectedLensId = selectedLensId,
+            selectedLensId = resolvedLensId,
+            preferredVideoLens = preferredVideoLensPreference,
             photoResolution = actualPhotoLabel,
             videoResolution = effectiveVideoLabel,
             captureOrientation = captureOrientationPreference,
             detectedAutoRotation = lastAutoDetectedRotation,
             cameraError = null
         )
+    }
+
+    /**
+     * Starts VideoCapture headlessly (without needing a PreviewView) for background widget launches,
+     * applying the configured Wide (default) or Ultra-Wide lens with automatic widest-lens fallback.
+     */
+    @SuppressLint("MissingPermission")
+    fun startBackgroundVideoRecording(
+        outputFile: File,
+        enableAudio: Boolean,
+        lensPreference: VideoLensPreference,
+        onVideoStarted: () -> Unit = {},
+        onVideoSaved: (File) -> Unit,
+        onError: (String) -> Unit
+    ) {
+        if (isRecordingActiveOrFinalizing) {
+            onError("Previous video recording is still finalizing")
+            return
+        }
+
+        preferredVideoLensPreference = lensPreference
+        val existingProvider = cameraProvider
+        if (existingProvider != null) {
+            bindHeadlessVideoAndStart(
+                provider = existingProvider,
+                outputFile = outputFile,
+                enableAudio = enableAudio,
+                lensPreference = lensPreference,
+                onVideoStarted = onVideoStarted,
+                onVideoSaved = onVideoSaved,
+                onError = onError
+            )
+            return
+        }
+
+        val future = ProcessCameraProvider.getInstance(context)
+        future.addListener({
+            try {
+                val provider = future.get()
+                cameraProvider = provider
+                bindHeadlessVideoAndStart(
+                    provider = provider,
+                    outputFile = outputFile,
+                    enableAudio = enableAudio,
+                    lensPreference = lensPreference,
+                    onVideoStarted = onVideoStarted,
+                    onVideoSaved = onVideoSaved,
+                    onError = onError
+                )
+            } catch (e: Exception) {
+                onError(e.message ?: "Failed to initialize camera provider")
+            }
+        }, ContextCompat.getMainExecutor(context))
+    }
+
+    private fun bindHeadlessVideoAndStart(
+        provider: ProcessCameraProvider,
+        outputFile: File,
+        enableAudio: Boolean,
+        lensPreference: VideoLensPreference,
+        onVideoStarted: () -> Unit,
+        onVideoSaved: (File) -> Unit,
+        onError: (String) -> Unit
+    ) {
+        if (isRecordingActiveOrFinalizing) {
+            onError("Previous video recording is still finalizing")
+            return
+        }
+
+        backgroundLifecycleOwner.moveToResumed()
+        isFrontCamera = false
+        activeCustomSelector = null
+
+        val initialRotation = resolveCurrentRotation(lastPreviewView)
+        var effectiveVideoLabel = "4K 30fps"
+        var boundVideoUseCase = buildVideoUseCase(initialRotation, highQuality4k = true)
+
+        var selectedSelector = CameraSelector.DEFAULT_BACK_CAMERA
+        var boundCamera = tryBindUseCases(provider, selectedSelector, boundVideoUseCase)
+        if (boundCamera == null) {
+            boundVideoUseCase = buildVideoUseCase(initialRotation, highQuality4k = false)
+            boundCamera = tryBindUseCases(provider, selectedSelector, boundVideoUseCase)
+            effectiveVideoLabel = "4K/HD Auto"
+        }
+
+        if (boundCamera == null) {
+            onError("Unable to bind back camera for background video")
+            return
+        }
+
+        val zoomState = boundCamera.cameraInfo.zoomState.value
+        val minZoom = zoomState?.minZoomRatio ?: 1.0f
+        val maxZoom = zoomState?.maxZoomRatio ?: 8.0f
+        val discoveredLenses = buildLensOptions(
+            provider = provider,
+            isFront = false,
+            minZoom = minZoom,
+            maxZoom = maxZoom
+        )
+
+        val chosenLens = resolveLensForPreference(discoveredLenses, lensPreference)
+        var targetZoom = chosenLens.targetZoomRatio.coerceIn(minZoom, maxZoom)
+
+        // If Ultra-Wide requires a standalone physical camera selector on this device, rebind to it
+        if (chosenLens.customCameraSelector != null) {
+            val customVideoUseCase = buildVideoUseCase(initialRotation, highQuality4k = true)
+            val customCam = tryBindUseCases(provider, chosenLens.customCameraSelector, customVideoUseCase)
+            if (customCam != null) {
+                boundCamera = customCam
+                boundVideoUseCase = customVideoUseCase
+                selectedSelector = chosenLens.customCameraSelector
+                activeCustomSelector = chosenLens.customCameraSelector
+                targetZoom = chosenLens.targetZoomRatio
+            }
+        }
+
+        if (abs(targetZoom - 1.0f) > 0.001f) {
+            try {
+                boundCamera.cameraControl.setZoomRatio(targetZoom)
+            } catch (e: Exception) {
+                // Ignore if unsupported
+            }
+        }
+
+        preview = null
+        imageCapture = null
+        videoCapture = boundVideoUseCase
+        camera = boundCamera
+        boundPreviewView = null
+        activeBoundSelector = selectedSelector
+        isCameraBound = true
+        boundHasImageCapture = false
+        boundHasVideoCapture = true
+        activeMode = RecorderMode.VIDEO
+
+        _cameraState.value = _cameraState.value.copy(
+            isFrontCamera = false,
+            currentZoomRatio = targetZoom,
+            minZoomRatio = minZoom,
+            maxZoomRatio = maxZoom,
+            lensOptions = discoveredLenses,
+            selectedLensId = chosenLens.id,
+            preferredVideoLens = lensPreference,
+            videoResolution = effectiveVideoLabel,
+            captureOrientation = captureOrientationPreference,
+            cameraError = null
+        )
+
+        startVideoRecording(
+            outputFile = outputFile,
+            enableAudio = enableAudio,
+            onVideoStarted = onVideoStarted,
+            onVideoSaved = onVideoSaved,
+            onError = onError
+        )
+    }
+
+    fun resolveLensForPreference(
+        lenses: List<LensOption>,
+        preference: VideoLensPreference
+    ): LensOption {
+        return when (preference) {
+            VideoLensPreference.ULTRAWIDE -> {
+                lenses.find { it.id == "uw" }
+                    ?: lenses.minByOrNull { it.targetZoomRatio }
+                    ?: LensOption(id = "1x", label = "1x", name = "Wide", targetZoomRatio = 1.0f)
+            }
+            VideoLensPreference.WIDE -> {
+                lenses.find { it.id == "1x" }
+                    ?: LensOption(id = "1x", label = "1x", name = "Wide", targetZoomRatio = 1.0f)
+            }
+        }
     }
 
     private fun buildPhotoUseCase(
@@ -782,6 +1041,7 @@ class CameraManager(private val context: Context) {
     ): ImageCapture {
         return ImageCapture.Builder()
             .setCaptureMode(captureMode)
+            .setJpegQuality(BURST_JPEG_QUALITY)
             .setFlashMode(ImageCapture.FLASH_MODE_OFF)
             .setResolutionSelector(selector)
             .setTargetRotation(targetRotation)
@@ -898,7 +1158,9 @@ class CameraManager(private val context: Context) {
     }
 
     fun canEnqueueBurstShot(): Boolean {
-        return isCameraBound && imageCapture != null && inFlightImageCaptures.get() < MAX_IN_FLIGHT_BURST
+        return isCameraBound &&
+            imageCapture != null &&
+            inFlightImageCaptures.get() < MAX_IN_FLIGHT_CAPTURE_PIPELINE
     }
 
     fun takePhoto(
@@ -912,8 +1174,8 @@ class CameraManager(private val context: Context) {
             return
         }
 
-        if (inFlightImageCaptures.get() >= MAX_IN_FLIGHT_BURST) {
-            onError("Burst buffer full, saving photos...")
+        if (inFlightImageCaptures.get() >= MAX_IN_FLIGHT_CAPTURE_PIPELINE) {
+            onError("Camera pipeline busy, buffering previous shots…")
             return
         }
 
@@ -940,6 +1202,52 @@ class CameraManager(private val context: Context) {
         } catch (e: Exception) {
             inFlightImageCaptures.updateAndGet { count -> (count - 1).coerceAtLeast(0) }
             onError(e.message ?: "Photo capture failed")
+        }
+    }
+
+    /**
+     * Captures a burst-tuned (88% JPEG) frame directly into an in-memory ByteArrayOutputStream
+     * without synchronous disk writes, freeing CameraX ImageReader slots immediately for up to
+     * 100 consecutive burst shots while a background drainer saves frames asynchronously.
+     */
+    fun takeBurstPhotoToMemory(
+        onSuccess: (ByteArray) -> Unit,
+        onError: (String) -> Unit
+    ) {
+        val capture = imageCapture
+        if (capture == null || !isCameraBound) {
+            onError("Camera is still initializing, please try again")
+            return
+        }
+
+        if (inFlightImageCaptures.get() >= MAX_IN_FLIGHT_CAPTURE_PIPELINE) {
+            onError("Pipeline busy")
+            return
+        }
+
+        inFlightImageCaptures.incrementAndGet()
+        try {
+            capture.targetRotation = resolveCurrentRotation(lastPreviewView)
+            val baos = ByteArrayOutputStream(1536 * 1024)
+            val outputOptions = ImageCapture.OutputFileOptions.Builder(baos).build()
+            capture.takePicture(
+                outputOptions,
+                captureExecutor,
+                object : ImageCapture.OnImageSavedCallback {
+                    override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
+                        inFlightImageCaptures.updateAndGet { count -> (count - 1).coerceAtLeast(0) }
+                        onSuccess(baos.toByteArray())
+                    }
+
+                    override fun onError(exception: ImageCaptureException) {
+                        inFlightImageCaptures.updateAndGet { count -> (count - 1).coerceAtLeast(0) }
+                        onError(exception.message ?: "Burst photo capture failed")
+                    }
+                }
+            )
+        } catch (e: Exception) {
+            inFlightImageCaptures.updateAndGet { count -> (count - 1).coerceAtLeast(0) }
+            onError(e.message ?: "Burst photo capture failed")
         }
     }
 

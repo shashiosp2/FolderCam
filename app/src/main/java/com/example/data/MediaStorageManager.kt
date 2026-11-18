@@ -47,6 +47,8 @@ class MediaStorageManager(private val context: Context) {
     private val dateFormat = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US)
     private val fileSequence = AtomicInteger(0)
 
+    fun generateUniqueFileName(type: MediaType): String = buildUniqueFileName(type)
+
     private fun buildUniqueFileName(type: MediaType): String {
         val timestamp = synchronized(dateFormat) {
             dateFormat.format(Date())
@@ -208,17 +210,115 @@ class MediaStorageManager(private val context: Context) {
         }
     }
 
+    fun ensureFolderDirectoryExists(folder: MediaFolder): Boolean {
+        var createdOrPresent = false
+        try {
+            val realDir = toRealFile(folder.sdcardPath)
+            if (realDir.exists()) {
+                createdOrPresent = realDir.isDirectory
+            } else if (realDir.mkdirs() || realDir.exists()) {
+                createdOrPresent = true
+            }
+        } catch (e: Exception) {
+            // Ignore if direct /sdcard creation requires All Files Access or SAF
+        }
+
+        try {
+            getMirrorDirectory(folder)
+        } catch (e: Exception) {
+            // Ignore
+        }
+
+        folder.treeUri?.let { uriStr ->
+            try {
+                val targetUri = resolveOrCreateSubfolderDocUri(
+                    treeUri = Uri.parse(uriStr),
+                    targetSdcardPath = folder.sdcardPath
+                )
+                if (targetUri != null) {
+                    createdOrPresent = true
+                }
+            } catch (e: Exception) {
+                // Ignore invalid or revoked tree URI
+            }
+        }
+
+        return createdOrPresent
+    }
+
+    fun ensureAllFolderDirectoriesExist(folders: List<MediaFolder>) {
+        folders.forEach { folder ->
+            ensureFolderDirectoryExists(folder)
+        }
+    }
+
+    fun prepareBurstSpillFile(desiredFileName: String): File {
+        val spillDir = File(context.cacheDir, "burst_spill")
+        if (!spillDir.exists()) {
+            spillDir.mkdirs()
+        }
+        return File(spillDir, desiredFileName)
+    }
+
+    suspend fun saveBytesToFolder(
+        folder: MediaFolder,
+        fileName: String,
+        bytes: ByteArray,
+        type: MediaType
+    ): MediaSaveResult = withContext(Dispatchers.IO) {
+        ensureFolderDirectoryExists(folder)
+        val mimeType = mimeTypeFor(type)
+        val realSdcardDir = toRealFile(folder.sdcardPath)
+
+        // 1. Direct /sdcard write when permitted (ideal zero-copy path)
+        try {
+            if (canWriteDirectlyToSdcardDir(realSdcardDir)) {
+                val destFile = File(realSdcardDir, fileName)
+                destFile.writeBytes(bytes)
+                if (destFile.exists() && destFile.length() > 0L) {
+                    scanMediaFile(destFile.absolutePath, mimeType)
+                    return@withContext MediaSaveResult(
+                        savedToPublicSdcard = true,
+                        destinationPath = "${folder.sdcardPath}/${destFile.name}",
+                        finalFile = destFile
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            // Fall through to SAF / MediaStore / mirror
+        }
+
+        // 2. Write to staging mirror so file is safely on disk even if SAF/MediaStore needs it
+        val mirrorFile = File(getMirrorDirectory(folder), fileName)
+        try {
+            mirrorFile.writeBytes(bytes)
+        } catch (e: Exception) {
+            return@withContext MediaSaveResult(
+                savedToPublicSdcard = false,
+                destinationPath = folder.sdcardPath,
+                finalFile = mirrorFile,
+                errorMessage = e.message ?: "Failed to write buffered frame"
+            )
+        }
+
+        // 3. Delegate finalization (SAF -> MediaStore -> All Files Access prompt)
+        finalizeCapturedFile(folder, mirrorFile, type)
+    }
+
     fun prepareStagingFallbackFile(folder: MediaFolder, desiredFileName: String): File {
+        ensureFolderDirectoryExists(folder)
         val mirrorDir = getMirrorDirectory(folder)
         return File(mirrorDir, desiredFileName)
     }
 
     fun prepareFastPhotoFile(folder: MediaFolder): File {
+        ensureFolderDirectoryExists(folder)
         val mirrorDir = getMirrorDirectory(folder)
         return File(mirrorDir, buildUniqueFileName(MediaType.PHOTO))
     }
 
     fun prepareOutputFile(folder: MediaFolder, type: MediaType): File {
+        ensureFolderDirectoryExists(folder)
         val fileName = buildUniqueFileName(type)
 
         try {

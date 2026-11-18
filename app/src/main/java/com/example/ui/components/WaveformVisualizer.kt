@@ -58,6 +58,8 @@ fun WaveformVisualizer(
     amplitudes: List<Float>,
     currentDecibels: Float,
     targetFolder: MediaFolder?,
+    isDndActive: Boolean = false,
+    isMicPreemptedByCall: Boolean = false,
     onOpenFolderSettings: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -151,13 +153,14 @@ fun WaveformVisualizer(
             Spacer(modifier = Modifier.height(4.dp))
 
             Text(
-                text = if (isRecording) {
-                    "Capturing live microphone waveform (AAC 44.1 kHz)"
-                } else {
-                    "Tap the Audio Record button below to start recording"
+                text = when {
+                    isRecording && isMicPreemptedByCall -> "Phone call active — preserving file & auto-resuming…"
+                    isRecording && isDndActive -> "DND ON • Call-resilient background recording"
+                    isRecording -> "Capturing live microphone waveform (AAC 44.1 kHz)"
+                    else -> "Tap the Audio Record button below to start recording"
                 },
                 style = MaterialTheme.typography.bodyMedium,
-                color = colorScheme.onSurfaceVariant
+                color = if (isMicPreemptedByCall) colorScheme.error else colorScheme.onSurfaceVariant
             )
 
             Spacer(modifier = Modifier.height(12.dp))
